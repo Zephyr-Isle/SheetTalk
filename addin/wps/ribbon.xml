@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WPS 加载项功能区定义:在「AI 助手」标签里放一个开关侧边栏的按钮。
+     onAction 对应 js/main.js(由自动生成的 index.html 引入)里的全局函数。 -->
+<customUI xmlns="http://schemas.microsoft.com/office/2006/01/customui">
+  <ribbon startFromScratch="false">
+    <tabs>
+      <tab id="excelAiTab" label="表答">
+        <group id="excelAiGroup" label="表答">
+          <button id="excelAiTogglePane"
+                  label="AI 助手"
+                  size="large"
+                  imageMso="HappyFace"
+                  onAction="toggleExcelAiPane"
+                  screentip="打开 / 关闭表答 AI 助手"
+                  supertip="与桌面程序「表答 SheetTalk」共享同一份对话,直接读写当前工作簿。需要本机正在运行该程序(127.0.0.1:8765)。"/>
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>

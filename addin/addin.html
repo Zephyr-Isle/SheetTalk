@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>表答 SheetTalk</title>
+<script>
+  /* Office JS 只在 Excel 等微软宿主里有用;WPS 任务窗格(host=wps)没有该运行时,
+     跳过联网加载以免无谓请求。document.write 保持解析期同步加载的原语义。 */
+  if (/[?&]host=wps(&|$)/.test(location.search)) { window.__noOffice = true; }
+  else { document.write('<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js" onerror="window.__noOffice=true"><\/script>'); }
+</script>
+<script src="/marked.min.js" onerror="window.__noMarked=true"></script>
+<script src="/purify.min.js" onerror="window.__noPurify=true"></script>
+<style>
+  :root {
+    --bg:#f3f3f3; --surface:#ffffff; --surface-dim:#fafafa; --outline:#e5e5e5;
+    --text:#1b1b1b; --muted:#5d5d5d; --g1:#107c41; --g2:#0b5c30;
+    --ok:#0f7b0f; --bad:#c42b1c; --warn:#9d5d00; --err-bg:#fdeceb;
+    /* Windows 自带图标字体,替代 Emoji:跨版本渲染一致,且不发网络请求 */
+    --icon-font:"Segoe Fluent Icons","Segoe MDL2 Assets","Segoe UI Symbol";
+  }
+  /* 深色主题:跟随桌面端 theme_mode(auto/light/dark),由 JS 切 body.dark */
+  body.dark {
+    --bg:#1f1f1f; --surface:#2b2b2b; --surface-dim:#242424; --outline:#414141;
+    --text:#f2f2f2; --muted:#a6a6a6; --err-bg:#3a1f1f;
+  }
+  /* 图标类:必须单独指定 icon 字体,否则字符会显示成豆腐块 */
+  .ico { font-family:var(--icon-font); font-style:normal; font-weight:normal;
+         line-height:1; display:inline-block; speak:never; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; }
+  body { font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; background:var(--bg);
+         color:var(--text); display:flex; flex-direction:column; overflow:hidden; font-size:13.5px; }
+  header { display:flex; align-items:center; gap:8px; padding:8px 10px; background:var(--surface);
+           border-bottom:1px solid var(--outline); flex:none; }
+  /* 顶部不再放标题(任务窗格宽度宝贵),连接状态胶囊占满剩余宽度 */
+  .pill { display:inline-flex; align-items:center; gap:5px; font-size:11px; color:var(--muted);
+          border:1px solid var(--outline); border-radius:999px; padding:3px 9px; cursor:pointer;
+          flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pill .dot { width:7px; height:7px; border-radius:50%; background:var(--bad); flex:none; }
+  .pill.ok .dot { background:var(--ok); } .pill.warn .dot { background:var(--warn); }
+  .icon-btn { border:none; background:transparent; font-size:15px; cursor:pointer; color:var(--muted);
+              width:28px; height:28px; border-radius:7px; flex:none; }
+  .icon-btn:hover { background:var(--surface-dim); }
+
+  /* 启动自检异常横幅(红色,可关闭) */
+  #startup-issues { display:none; margin:0 10px 6px; padding:7px 10px; font-size:11.5px;
+                    color:var(--bad); background:#fdeceb; border:1px solid var(--bad);
+                    border-radius:10px; white-space:pre-wrap; word-break:break-all; }
+  body.dark #startup-issues { background:#3a1f1f; }
+  #startup-issues.show { display:block; }
+
+  #chat { flex:1; overflow-y:auto; padding:12px 10px 6px; }
+  .empty { text-align:center; padding:18px 8px; }
+  .empty .big { font-size:30px; }
+  .empty h2 { font-size:16px; margin:6px 0 4px; }
+  .empty p { color:var(--muted); font-size:12px; line-height:1.6; }
+  .card { background:var(--surface); border:1px solid var(--outline); border-radius:14px;
+          padding:12px; margin:12px auto 0; max-width:100%; text-align:left; font-size:12.5px; }
+  .row { display:flex; gap:8px; padding:4px 0; line-height:1.55; align-items:flex-start; }
+  .n { color:#fff; background:linear-gradient(135deg,var(--g1),var(--g2)); width:17px; height:17px;
+       border-radius:50%; font-size:10px; display:inline-flex; align-items:center;
+       justify-content:center; flex:none; margin-top:2px; }
+  .btnrow { display:flex; gap:6px; margin-top:10px; flex-wrap:wrap; }
+  .btn { border:1px solid var(--outline); background:var(--surface); color:var(--text);
+         font-size:12px; border-radius:8px; padding:6px 11px; cursor:pointer; }
+  .btn:hover { border-color:var(--g1); color:var(--g1); }
+  .btn.primary { background:linear-gradient(135deg,var(--g1),var(--g2)); color:#fff; border:none; }
+  .cap { font-size:11px; color:var(--muted); margin:12px 0 6px; text-align:center; }
+  .example { background:var(--surface); border:1px solid var(--outline); border-radius:9px;
+             padding:7px 10px; font-size:12px; cursor:pointer; margin:0 auto 6px; max-width:100%;
+             text-align:left; line-height:1.5; }
+  .example:hover { border-color:var(--g1); }
+
+  .msg { margin-bottom:10px; }
+  .msg.user { display:flex; justify-content:flex-end; }
+  .bubble { max-width:88%; border-radius:13px; padding:8px 11px; font-size:12.5px; line-height:1.6;
+            word-break:break-word; overflow-wrap:break-word; }
+  .msg.user .bubble { background:linear-gradient(135deg,var(--g1),var(--g2)); color:#fff;
+                      border-bottom-right-radius:4px; }
+  .msg.ai { display:flex; }
+  .msg.ai .bubble { background:var(--surface); border:1px solid var(--outline);
+                    border-bottom-left-radius:4px; max-width:calc(100% - 16px); }
+  /* 危险操作确认条 */
+  #confirm-bar { margin:0 10px 4px; padding:8px 10px; flex:none;
+                 background:var(--surface); border:1px solid var(--warn);
+                 border-radius:10px; font-size:12px; }
+  #confirm-bar .cb-title { color:var(--warn); font-weight:600; margin-bottom:3px; }
+  #confirm-bar .cb-summary { color:var(--text); margin-bottom:7px; word-break:break-all; }
+  #confirm-bar .cb-btns { display:flex; gap:6px; }
+  #confirm-bar .btn { flex:1; }
+  .cb-select { flex:1; border:1px solid var(--outline); border-radius:8px; padding:6px 8px;
+               font:inherit; font-size:12px; outline:none; background:#fbfcfe;
+               color:var(--text); min-width:0; }
+  body.dark .cb-select { background:#1f1f1f; }
+  /* 按钮颜色随语义:拒绝=红,允许=品牌绿(红色只给危险语义) */
+  .cb-red { background:var(--bad) !important; color:#fff !important; border:none; }
+  .cb-red:hover { opacity:.88; }
+  .cb-green { background:var(--g1) !important; color:#fff !important; border:none; }
+  .cb-green:hover { opacity:.88; }
+  .cb-remember { display:flex; gap:5px; align-items:center; font-size:11px;
+                 color:var(--muted); margin:-2px 0 0; cursor:pointer; }
+  .cb-remember input { accent-color:var(--g1); margin:0; }
+
+  /* 加载动画:等待首个内容时的三点打字动画 */
+  .typing { display:flex; gap:4px; padding:3px 0; }
+  .typing span { width:6px; height:6px; border-radius:50%; background:var(--muted);
+                 opacity:.25; animation:typing-dot 1s infinite; }
+  .typing span:nth-child(2) { animation-delay:.18s; }
+  .typing span:nth-child(3) { animation-delay:.36s; }
+  @keyframes typing-dot { 0% { opacity:.25; } 40% { opacity:.95; } 100% { opacity:.25; } }
+
+  .note { color:var(--muted); font-size:11px; margin-bottom:6px; }
+  .md { color:var(--text); }
+  .md p { margin:4px 0; } .md h1,.md h2,.md h3 { margin:8px 0 4px; font-size:14px; }
+  .md ul,.md ol { padding-left:18px; margin:4px 0; }
+  .md table { border-collapse:collapse; margin:6px 0; display:block; overflow-x:auto; max-width:100%; }
+  .md th,.md td { border:1px solid var(--outline); padding:4px 8px; font-size:11.5px; }
+  .md th { background:var(--surface-dim); }
+  .md code { font-family:Consolas,"Courier New",monospace; font-size:11.5px; background:var(--surface-dim);
+             border-radius:4px; padding:1px 4px; }
+  .md pre { background:#141a2b; color:#dbe4ff; padding:8px 10px; border-radius:8px; overflow-x:auto; margin:6px 0; }
+  .md pre code { background:transparent; padding:0; color:inherit; }
+  .md a { color:var(--g1); }
+  .steps { display:flex; flex-direction:column; gap:4px; margin:2px 0 8px; }
+  .step { font-size:11px; color:var(--muted); background:var(--surface-dim); border:1px solid var(--outline);
+          border-radius:7px; padding:4px 8px; display:flex; gap:6px; align-items:baseline; }
+  .step .st { flex:none; }
+  /* 引用溯源:步骤右侧的灰色小标签,标明这一步动的是哪块区域 */
+  .step .ref { margin-left:auto; flex:none; font-size:10px; color:var(--muted);
+               background:rgba(128,128,128,.14); border-radius:4px; padding:1px 5px; }
+  /* 计划卡片:动手前先给用户看计划 */
+  .plan { margin:6px 0 10px; padding:10px 12px; border-radius:10px;
+          background:var(--g1); color:#fff; font-size:12px; line-height:1.55; }
+  .plan .h { font-weight:600; margin-bottom:4px; display:flex; align-items:center; gap:6px; }
+  .plan .body { white-space:pre-wrap; }
+  .stopped { text-align:center; color:var(--muted); font-size:11px; margin:4px 0 10px; }
+  /* 图标默认按 1em 渲染,这里统一尺寸与基线,避免与中文基线错位 */
+  .step .ico, .err .ico, .test-result .ico { font-size:12px; vertical-align:-1px; margin-right:3px; }
+  .icon-btn .ico { font-size:14px; }
+  .send .ico { font-size:14px; }
+  .chip .ico { font-size:12px; margin-right:4px; }
+  .logo.ico { font-size:15px; }
+  .empty .big.ico { font-size:30px; }
+  h3 .ico { font-size:15px; margin-right:4px; vertical-align:-2px; }
+  .step.done .st { color:var(--ok); } .step.fail .st { color:var(--bad); } .step.running .st { color:var(--warn); }
+  .status-line { font-size:11px; color:var(--muted); padding:2px 2px 6px; }
+  .err { color:var(--bad); font-size:12px; white-space:pre-line; margin-bottom:10px;
+         background:var(--err-bg); border:1px solid var(--bad); border-radius:10px; padding:8px 11px; }
+
+  #chips { display:flex; gap:6px; padding:0 10px 6px; overflow-x:auto; flex:none; scrollbar-width:none; }
+  #chips::-webkit-scrollbar { display:none; }
+  .chip { flex:none; font-size:11px; color:var(--text); background:var(--surface); border:1px solid var(--outline);
+          border-radius:999px; padding:5px 10px; cursor:pointer; white-space:nowrap; }
+  .chip:hover { border-color:var(--g1); color:var(--g1); }
+
+  /* 选区附件:与桌面端同款 —— Excel 里有框选时默认附上,可移除/恢复 */
+  #sel { display:none; align-items:center; gap:6px; margin:0 10px 4px; padding:4px 9px;
+         font-size:11px; color:var(--muted); background:var(--surface-dim);
+         border:1px dashed var(--outline); border-radius:8px; flex:none; }
+  #sel.show { display:flex; }
+  #sel.detached { border-style:solid; opacity:.8; }
+  #sel .ref-t { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sel-btn { border:none; background:transparent; color:var(--g1); cursor:pointer;
+             font-size:11px; flex:none; padding:0 2px; font-family:inherit; }
+  .sel-btn:hover { text-decoration:underline; }
+  /* 点选区文字展开的内容预览(当前框选的值,前 6 行) */
+  #sel-preview { margin:0 10px 4px; padding:6px 9px; font-size:11px; color:var(--text);
+                 background:var(--surface-dim); border:1px solid var(--outline);
+                 border-radius:8px; flex:none; white-space:pre-wrap; word-break:break-all;
+                 max-height:120px; overflow-y:auto;
+                 font-family:Consolas,"Courier New",monospace; }
+
+  #composer { flex:none; padding:8px 10px 10px; }
+  .input-wrap { display:flex; align-items:flex-end; gap:6px; background:var(--surface);
+                border:1.5px solid var(--outline); border-radius:14px; padding:6px 6px 6px 12px; }
+  .input-wrap:focus-within { border-color:var(--g1); }
+  textarea { flex:1; border:none; outline:none; resize:none; font:inherit; font-size:12.5px;
+             line-height:1.5; max-height:96px; background:transparent; padding:7px 0; }
+  .send { border:none; width:32px; height:32px; border-radius:10px; cursor:pointer; flex:none;
+          background:linear-gradient(135deg,var(--g1),var(--g2)); color:#fff; font-size:14px; }
+  /* 发送键永不置灰:空输入点击给提示(与桌面端「空文本聚焦输入框」对齐,避免死按钮困惑) */
+  .send.idle { opacity:.55; }
+  /* 停止态:换成中性灰,避免用户误以为还能继续发消息 */
+  .send.stop { background:var(--muted); }
+  /* 计划模式开关:Win11 拨杆样式 */
+  .switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; }
+  .switch input { display:none; }
+  .switch span { width:40px; height:20px; border-radius:10px; background:#8a8a8a;
+                 position:relative; transition:background .15s; }
+  .switch span::after { content:""; position:absolute; left:2px; top:2px; width:16px; height:16px;
+                        border-radius:50%; background:#fff; transition:transform .15s; }
+  .switch input:checked + span { background:var(--g1); }
+  .switch input:checked + span::after { transform:translateX(20px); }
+  .hint { text-align:center; font-size:10px; color:var(--muted); margin-top:6px; }
+
+  #mask { position:fixed; inset:0; background:rgba(15,20,35,.45); display:none; z-index:50;
+          align-items:center; justify-content:center; }
+  #mask.show { display:flex; }
+  .modal { background:var(--surface); border-radius:14px; width:92%; max-width:360px;
+           padding:16px; max-height:92vh; overflow-y:auto; }
+  .modal h3 { font-size:14px; margin-bottom:12px; }
+  .field { margin-bottom:10px; }
+  .field label { display:block; font-size:11px; color:var(--muted); margin-bottom:4px; }
+  .field input, .field select { width:100%; border:1px solid var(--outline); border-radius:8px;
+          padding:7px 9px; font:inherit; font-size:12.5px; outline:none; background:#fbfcfe; }
+  body.dark .field input, body.dark .field select { background:#1f1f1f; color:var(--text); }
+  .field input:focus, .field select:focus { border-color:var(--g1); }
+ .field-hint { font-size:11px; color:var(--muted); margin-top:4px; line-height:1.5; }
+  .area { width:100%; border:1px solid var(--outline); border-radius:8px; padding:7px 9px;
+          font:inherit; font-size:12px; outline:none; background:#fbfcfe; resize:vertical;
+          line-height:1.5; color:var(--text); }
+  body.dark .area { background:#1f1f1f; }
+  .area:focus { border-color:var(--g1); }
+  .modal .btnrow { justify-content:flex-end; }
+  .test-result { font-size:11px; margin-top:6px; white-space:pre-line; word-break:break-all; display:none; }
+  .test-result.ok { color:var(--ok); display:block; } .test-result.bad { color:var(--bad); display:block; }
+  #toast { position:fixed; bottom:78px; left:50%; transform:translateX(-50%); background:#1f2430;
+           color:#fff; font-size:11.5px; border-radius:8px; padding:7px 14px; opacity:0;
+           pointer-events:none; transition:opacity .25s; z-index:99; max-width:85%; text-align:center; }
+  #toast.show { opacity:.95; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="pill" id="pill" title="点击重新连接"><span class="dot"></span><span id="pill-text">检测中…</span></div>
+  <button class="icon-btn" id="btn-clear" title="清空对话"><span class="ico">&#xE74D;</span></button>
+  <button class="icon-btn" id="btn-settings" title="设置"><span class="ico">&#xE713;</span></button>
+</header>
+
+<div id="startup-issues"></div>
+
+<div id="chat">
+  <div class="empty" id="empty">
+    <div class="big ico" style="color:var(--warn)">&#xEA80;</div>
+    <h2>让 AI 帮你操作表格</h2>
+    <p>正在 Excel 内部与你对话<br>用中文直接说出你想做的事</p>
+    <div class="card">
+      <div class="row"><span class="n">1</span><span>需要桌面程序「表答 SheetTalk」在本机运行</span></div>
+      <div class="row"><span class="n">2</span><span>右上角设置按钮配置模型与 API Key</span></div>
+      <div class="row"><span class="n">3</span><span>下方输入需求,AI 直接操作当前工作簿</span></div>
+      <div class="btnrow">
+        <button class="btn primary" id="btn-reconnect">重新连接</button>
+        <button class="btn" id="btn-launch-excel">启动 Excel</button>
+        <button class="btn" id="btn-launch-wps">启动 WPS</button>
+      </div>
+    </div>
+    <div class="cap">试试这样问</div>
+    <div class="example">分析当前工作表的数据,总结关键发现</div>
+    <div class="example">按销售额从高到低排序,前十名标红</div>
+    <div class="example">根据类目统计占比,并生成饼图</div>
+  </div>
+</div>
+
+<div id="chips">
+  <span class="chip"><span class="ico">&#xE9D2;</span> 分析这个表</span>
+  <span class="chip"><span class="ico">&#xE8B9;</span> 生成图表</span>
+  <span class="chip"><span class="ico">&#xE8EF;</span> 写同比公式</span>
+  <span class="chip"><span class="ico">&#xE71C;</span> 清洗建议</span>
+</div>
+
+<div id="sel">
+  <span class="ref-t" id="sel-text" title="点击预览选区内容"></span>
+  <button class="sel-btn" id="sel-toggle" type="button"></button>
+</div>
+<div id="sel-preview" hidden></div>
+<div id="confirm-bar" hidden>
+  <div class="cb-title">需要你的确认</div>
+  <div class="cb-summary" id="cb-summary"></div>
+  <div class="cb-btns">
+    <select id="cb-choice" class="cb-select">
+      <option value="once" selected>仅本次允许执行</option>
+      <option value="session">本会话始终允许该工具</option>
+      <option value="deny">拒绝执行</option>
+    </select>
+    <button class="btn" id="cb-ok" type="button">确认</button>
+  </div>
+  <label class="cb-remember" id="cb-remember-row" hidden>
+    <input type="checkbox" id="cb-remember">
+    <span>我了解风险:本会话内该工具不再弹确认;不勾选按仅本次处理</span>
+  </label>
+</div>
+
+<div id="composer">
+  <div class="input-wrap">
+    <textarea id="input" rows="1" placeholder="输入你想对表格做的事…"></textarea>
+    <button class="send" id="btn-send" title="发送"><span class="ico">&#xE72A;</span></button>
+  </div>
+  <div class="hint">Enter 发送 · Shift+Enter 换行 · 表格里的修改可用 Ctrl+Z 撤销</div>
+</div>
+
+<div id="mask">
+  <div class="modal">
+    <h3><span class="ico" style="color:var(--g1)">&#xE713;</span> 模型设置</h3>
+    <div class="field"><label>服务商预设</label><select id="f-provider"></select></div>
+    <div class="field"><label>接口地址(OpenAI 兼容 Base URL)</label><input id="f-base" placeholder="https://api.deepseek.com"></div>
+    <div class="field"><label>模型名称</label><input id="f-model" placeholder="deepseek-chat"></div>
+    <div class="field"><label>API Key(本地 Ollama 可留空)</label><input id="f-key" type="password" placeholder="sk-…"></div>
+    <div class="field"><label>计划模式(先出计划再动手)</label><label class="switch"><input type="checkbox" id="f-plan"><span></span></label><div class="field-hint">开启后每次任务会先展示一份执行计划再开始改表,适合复杂操作。</div></div>
+    <div class="field"><label>主题</label><select id="f-theme">
+      <option value="auto">自动跟随系统</option>
+      <option value="light">浅色</option>
+      <option value="dark">深色</option>
+    </select><div class="field-hint">桌面窗口与侧边栏同步生效。</div></div>
+    <div class="field"><label>示例快捷指令(每行一条;留空恢复内置默认)</label><textarea id="f-samples" rows="3" class="area"></textarea></div>
+    <div class="field"><label>单次任务最大工具步数(5–500)</label><input id="f-steps" type="number" min="5" max="500" step="1" value="30"><div class="field-hint" id="f-steps-hint">简单任务 20–30 足够;批量改写、跨表分析建议 60–150。</div></div>
+    <div class="test-result" id="test-result"></div>
+    <div class="btnrow">
+      <button class="btn" id="btn-test">测试连接</button>
+      <button class="btn primary" id="btn-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (s) { return document.querySelector(s); };
+  var chat = $("#chat"), input = $("#input"), sendBtn = $("#btn-send");
+  var busy = false, settingsCache = null, settingsHinted = false;
+  // 选区附件:与桌面端同一口径 —— 已连接且有框选就默认附上,可移除,选区变化时自动恢复
+  var selRef = "", selAttached = true;
+  // 主题:跟随桌面端设置(auto 跟随系统)
+  var themeMode = "auto";
+
+  if (window.Office && !window.__noOffice && typeof Office.onReady === "function") {
+    Office.onReady(function () { /* 宿主就绪,无需额外处理 */ });
+  }
+
+  function toast(text) {
+    var t = $("#toast"); t.textContent = text; t.classList.add("show");
+    clearTimeout(t._h); t._h = setTimeout(function () { t.classList.remove("show"); }, 2400);
+  }
+  function esc(s) { return ("" + s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+  function mdRender(src) {
+    if (window.marked && !window.__noMarked) {
+      try {
+        marked.setOptions({ gfm: true, breaks: true });
+        var html = marked.parse(src);
+        if (window.DOMPurify && !window.__noPurify) html = DOMPurify.sanitize(html);
+        return '<div class="md">' + html + "</div>";
+      } catch (e) { /* 落到内置渲染 */ }
+    }
+    var s = esc(src);
+    s = s.replace(/```[^\n]*\n([\s\S]*?)```/g, function (m, c) { return '<pre><code>' + c + "</code></pre>"; });
+    s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+    var lines = s.split("\n"), out = [], ul = false;
+    for (var i = 0; i < lines.length; i++) {
+      var m = lines[i].match(/^\s*[-*•]\s+(.*)$/);
+      if (m) { if (!ul) { out.push("<ul>"); ul = true; } out.push("<li>" + m[1] + "</li>"); }
+      else { if (ul) { out.push("</ul>"); ul = false; } out.push(lines[i]); }
+    }
+    if (ul) out.push("</ul>");
+    return '<div class="md">' + out.join("\n") + "</div>";
+  }
+
+  function scrollBottom() { chat.scrollTop = chat.scrollHeight; }
+  function removeEmpty() { var e = $("#empty"); if (e) e.remove(); }
+
+  function addUser(text, sel) {
+    removeEmpty();
+    var d = document.createElement("div");
+    d.className = "msg user";
+    // 纵向容器:气泡与附件标记上下堆叠(msg.user 是横向 flex,
+    // 直接塞子元素会并排排列,长选区文本会溢出屏幕)
+    var col = document.createElement("div");
+    col.style.cssText = "display:flex;flex-direction:column;align-items:flex-end;" +
+                        "max-width:88%;min-width:0;";
+    var b = document.createElement("div"); b.className = "bubble"; b.textContent = text;
+    col.appendChild(b);
+    if (sel) {   // 与桌面端一致:该条消息附带了 Excel 框选区域时,气泡下加小标记
+      var s = document.createElement("div");
+      s.className = "note"; s.style.textAlign = "right";
+      s.innerHTML = iconHTML(ICON.list) + " 附选区 " + esc(sel);
+      col.appendChild(s);
+    }
+    d.appendChild(col); chat.appendChild(d); scrollBottom();
+  }
+  function addAiCard() {
+    var d = document.createElement("div");
+    d.className = "msg ai";
+    d.innerHTML = '<div class="bubble"><div class="status-line"></div>' +
+        '<div class="typing" style="display:flex"><span></span><span></span><span></span></div>' +
+        '<div class="note" style="display:none"></div><div class="steps"></div><div class="body"></div></div>';
+    chat.appendChild(d); scrollBottom();
+    var card = { root: d, status: d.querySelector(".status-line"), note: d.querySelector(".note"),
+                 steps: d.querySelector(".steps"), body: d.querySelector(".body"),
+                 typing: d.querySelector(".typing"), stepMap: {} };
+    return card;
+  }
+  function setTyping(card, on) {
+    if (card && card.typing) card.typing.style.display = on ? "flex" : "none";
+  }
+  // 图标字符(Windows 自带 Segoe Fluent Icons,替代 Emoji,避免跨平台渲染差异)
+  var ICON = { clock: "\ue823", check: "\ue73e", error: "\uea39", warn: "\ue7ba", send: "\ue72a", stop: "\ue71a", list: "\ue8fd" };
+  function iconHTML(cp) { return '<span class="ico">' + cp + "</span>"; }
+
+  // 发送键状态:永不 disabled(对齐桌面端「任何状态点击都有反馈」)。
+  // 忙碌 = 停止态(中性灰);空闲 = 有文字实色、无文字半透明提示态。
+  function setBusy(on) {
+    sendBtn.classList.toggle("stop", !!on);
+    sendBtn.classList.toggle("idle", !on && input.value.trim() === "");
+    sendBtn.title = on ? "停止生成" : (input.value.trim() === "" ? "先输入要做什么" : "发送");
+    sendBtn.innerHTML = on ? iconHTML(ICON.stop) : iconHTML(ICON.send);
+  }
+  // 初始状态:空输入显示提示态,但依然可点(点击聚焦输入框,不再「灰着点不动」)
+  setBusy(false);
+
+  function addStep(m, sid, summary, ref) {
+    var s = document.createElement("div");
+    s.className = "step running";
+    var st = document.createElement("span"); st.className = "st";
+    st.innerHTML = iconHTML(ICON.clock);
+    var tx = document.createElement("span"); tx.textContent = summary;
+    s.appendChild(st); s.appendChild(tx);
+    if (ref) { var r = document.createElement("span"); r.className = "ref"; r.textContent = ref; s.appendChild(r); }
+    m.steps.appendChild(s); m.stepMap[sid] = s; scrollBottom();
+  }
+  function finishStep(m, sid, ok, brief) {
+    var s = m.stepMap[sid]; if (!s) return;
+    s.className = "step " + (ok ? "done" : "fail");
+    s.querySelector(".st").innerHTML = ok ? iconHTML(ICON.check) : iconHTML(ICON.error);
+    var tx = s.querySelector("span:nth-child(2)");
+    if (!ok && brief) tx.textContent = tx.textContent + "  —  " + brief;
+    scrollBottom();
+  }
+  function addPlan(text) {
+    removeEmpty();
+    var d = document.createElement("div"); d.className = "plan";
+    var h = document.createElement("div"); h.className = "h";
+    h.innerHTML = iconHTML(ICON.list) + "<span>执行计划</span>";
+    var b = document.createElement("div"); b.className = "body";
+    // 用 textContent 赋值:计划文本来自模型,不能当 HTML 解析
+    b.textContent = text;
+    d.appendChild(h); d.appendChild(b);
+    chat.appendChild(d); scrollBottom();
+  }
+  function addStopped() {
+    removeEmpty();
+    var d = document.createElement("div"); d.className = "stopped";
+    d.innerHTML = iconHTML(ICON.warn) + " 已停止";
+    chat.appendChild(d); scrollBottom();
+  }
+  function addError(text) {
+    removeEmpty();
+    var d = document.createElement("div"); d.className = "err";
+    d.innerHTML = iconHTML(ICON.warn) + " ";
+    d.appendChild(document.createTextNode(text));
+    chat.appendChild(d); scrollBottom();
+  }
+
+  function handleEvent(m, ev) {
+    switch (ev.kind) {
+      case "user_msg": addUser(ev.text, ev.with_selection && selRef ? selRef : ""); break;
+      case "text_start": m = addAiCard(); window.__curCard = m; break;
+      case "delta":
+        if (window.__curCard) { setTyping(window.__curCard, false);
+          window.__curCard._md = (window.__curCard._md || "") + ev.text;
+          window.__curCard.body.innerHTML = mdRender(window.__curCard._md); scrollBottom(); }
+        break;
+      case "note_flush":
+        if (window.__curCard && window.__curCard._md) {
+          setTyping(window.__curCard, false);
+          window.__curCard.note.textContent = window.__curCard._md;
+          window.__curCard.note.style.display = "block";
+          window.__curCard._md = ""; window.__curCard.body.innerHTML = "";
+        }
+        break;
+      case "step": if (window.__curCard) { setTyping(window.__curCard, false); addStep(window.__curCard, ev.sid, ev.summary, ev.ref); } break;
+      case "step_result": if (window.__curCard) finishStep(window.__curCard, ev.sid, ev.ok, ev.brief); break;
+      case "plan": addPlan(ev.text); break;
+      case "cancelled": addStopped(); if (window.__curCard) { setTyping(window.__curCard, false); window.__curCard.status.textContent = ""; } break;
+      case "status": if (window.__curCard) { window.__curCard.status.textContent = ev.text; } break;
+      case "error": addError(ev.text); if (window.__curCard) { setTyping(window.__curCard, false); window.__curCard.status.textContent = ""; } break;
+      case "done": if (window.__curCard) { setTyping(window.__curCard, false); window.__curCard.status.textContent = ""; } break;
+      case "confirm":
+        // 危险工具二次确认:弹出确认条(下拉默认「仅本次」),等用户决定后回传
+        $("#cb-summary").textContent = ev.summary || ev.tool || "";
+        $("#confirm-bar").dataset.sid = ev.sid || "";
+        $("#cb-choice").value = "once";
+        $("#cb-remember").checked = false;
+        $("#cb-remember-row").hidden = true;
+        $("#cb-ok").classList.remove("cb-red");
+        $("#cb-ok").classList.add("cb-green");
+        $("#confirm-bar").hidden = false;
+        scrollBottom();
+        break;
+      case "toast": toast(ev.text); break;
+      case "need_settings": toast("请先配置模型服务与 API Key"); openSettings(); break;
+    }
+  }
+
+  // XHR 渐进读取(兼容 WebView2 与旧版 IE 内核)
+  function chatStream(message, onDone) {
+    var m = null;
+    window.__curCard = null;
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/chat", true);
+    xhr.setRequestHeader("Content-Type", "application/json");
+    var pos = 0, buf = "";
+    function pump() {
+      if (xhr.responseText.length > pos) {
+        buf += xhr.responseText.slice(pos); pos = xhr.responseText.length;
+        var idx;
+        while ((idx = buf.indexOf("\n\n")) >= 0) {
+          var chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
+          if (chunk.slice(0, 6) !== "data: ") continue;
+          var ev; try { ev = JSON.parse(chunk.slice(6)); } catch (e) { continue; }
+          if (ev.kind === "text_start" && !window.__curCard) { handleEvent(m, ev); m = window.__curCard; continue; }
+          handleEvent(m, ev);
+        }
+      }
+    }
+    xhr.onprogress = pump;
+    xhr.onload = function () { pump(); busy = false; setBusy(false); onDone && onDone(); pollStatus(); };
+    xhr.onerror = function () {
+      busy = false; setBusy(false);
+      addError("网络错误:请确认桌面程序「表答 SheetTalk」正在本机运行。");
+      onDone && onDone();
+    };
+    xhr.send(JSON.stringify({ message: message, with_selection: selAttached }));
+  }
+
+  // 返回 true 表示消息已真正发出;忙碌时返回 false 且不动输入框(避免文字被吞)
+  function send(text) {
+    text = (text || "").trim();
+    if (!text) return false;
+    if (busy) { toast("正在处理上一条请求,请稍候…"); return false; }
+    busy = true; setBusy(true);
+    chatStream(text);
+    pollStatus();      // 发送即刷新选区条:徽标显示的是随消息发出的那一次框选
+    return true;
+  }
+
+  // 停止:通知后端在下一个安全点收尾(SSE 会补一条 cancelled 事件)
+  function stopRun() {
+    if (!busy) return;
+    fetch("/api/cancel", { method: "POST" });
+  }
+
+  function selDims(ref) {
+    // "$A$1:$C$10" → "10 行 × 3 列";单格/多区域/解析失败返回 ""
+    var m = /([^!]+)!\$?([A-Za-z]+)\$?([0-9]+)(?::\$?([A-Za-z]+)\$?([0-9]+))?$/.exec(ref);
+    if (!m) return "";
+    if (!m[4]) return "1 行 × 1 列";
+    function col(s) { var c = 0; for (var i = 0; i < s.length; i++) c = c * 26 + (s.charCodeAt(i) - 64); return c; }
+    return (Math.abs(+m[5] - +m[3]) + 1) + " 行 × " + (Math.abs(col(m[4]) - col(m[2])) + 1) + " 列";
+  }
+  function applySel() {
+    var box = $("#sel");
+    if (!selRef) { box.className = ""; $("#sel-preview").hidden = true; return; }
+    box.className = "show" + (selAttached ? "" : " detached");
+    var dims = selDims(selRef);
+    $("#sel-text").textContent = "选区 " + selRef + (dims ? " · " + dims : "");
+    $("#sel-toggle").textContent = selAttached ? "移除" : "附加";
+  }
+  $("#sel-toggle").onclick = function () { selAttached = !selAttached; applySel(); };
+  // 点选区文字:展开/收起内容预览(读当前框选的值,前 6 行)
+  $("#sel-text").onclick = function () {
+    var box = $("#sel-preview");
+    if (!box.hidden) { box.hidden = true; return; }
+    box.hidden = false;
+    box.textContent = "读取中…";
+    fetch("/api/selection").then(function (r) { return r.json(); }).then(function (d) {
+      var rows = (d.values || []).slice(0, 6).map(function (row) {
+        return row.map(function (c) { return c === null || c === undefined ? "" : c; }).join(" │ ");
+      });
+      var text = rows.join("\n");
+      box.textContent = text.trim() ? text : (d.note || "(空单元格)");
+    }).catch(function () { box.hidden = true; });
+  };
+
+  var mqDark = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+  function applyTheme() {
+    var dark = themeMode === "dark" || (themeMode !== "light" && mqDark && mqDark.matches);
+    document.body.classList.toggle("dark", dark);
+  }
+  if (mqDark && mqDark.addEventListener) mqDark.addEventListener("change", applyTheme);
+
+  function surfaceConfirm(p) {
+    // 弹出确认条(下拉重置为「仅本次」,按钮重置为品牌绿)
+    $("#cb-summary").textContent = p.summary || p.tool || "";
+    $("#confirm-bar").dataset.sid = p.sid;
+    $("#cb-choice").value = "once";
+    $("#cb-remember").checked = false;
+    $("#cb-remember-row").hidden = true;
+    $("#cb-ok").classList.remove("cb-red");
+    $("#cb-ok").classList.add("cb-green");
+    $("#confirm-bar").hidden = false;
+    scrollBottom();
+  }
+
+  function pollStatus() {
+    fetch("/api/status").then(function (r) { return r.json(); }).then(function (s) {
+      var pill = $("#pill"), txt = $("#pill-text");
+      pill.classList.remove("ok", "warn");
+      if (s.connected && s.workbook) { pill.classList.add("ok"); txt.textContent = s.host_label + " · " + s.workbook; }
+      else if (s.connected) { pill.classList.add("warn"); txt.textContent = s.host_label + " · 无工作簿"; }
+      else { txt.textContent = "未连接表格"; }
+      // 主题跟随桌面端设置
+      if (s.theme_mode && s.theme_mode !== themeMode) { themeMode = s.theme_mode; applyTheme(); }
+      // 选区附件
+      var ref = (s.connected && s.selection && s.active_sheet)
+        ? (s.active_sheet + "!" + s.selection) : "";
+      if (ref !== selRef) { selRef = ref; selAttached = !!ref; }
+      applySel();
+      if (!s.has_api_key && !settingsHinted) { settingsHinted = true; openSettings(); }
+    }).catch(function () {
+      $("#pill-text").textContent = "桌面程序未运行";
+      // 桌面程序不在线:隐藏选区附件,避免显示陈旧的框选状态
+      // 启动自检异常:红色横幅明示(不变量被破坏时,不等到运行时才炸)
+      if (s.startup_issues && s.startup_issues.length) {
+        var si = document.getElementById("startup-issues");
+        si.textContent = "启动自检异常:" + s.startup_issues.join("; ");
+        si.classList.add("show");
+      }
+      // 异常恢复:页面崩溃/刷新后,重新取回未决断的确认请求再弹出
+      fetch("/api/pending_confirm").then(function (r) { return r.json(); }).then(function (p) {
+        if (p && p.sid && document.getElementById("confirm-bar").hidden) {
+          surfaceConfirm(p);
+        }
+      }).catch(function () { });
+    });
+  }
+
+  function openSettings() {
+    fetch("/api/settings").then(function (r) { return r.json(); }).then(function (d) {
+      settingsCache = d;
+      var sel = $("#f-provider"); sel.innerHTML = "";
+      Object.keys(d.presets).forEach(function (k) {
+        var o = document.createElement("option"); o.value = k; o.textContent = d.presets[k].label; sel.appendChild(o);
+      });
+      sel.value = d.settings.provider || "deepseek";
+      $("#f-base").value = d.settings.base_url || "";
+      $("#f-model").value = d.settings.model || "";
+      $("#f-key").value = d.settings.api_key || "";
+      $("#f-steps").value = Math.max(5, Math.min(Math.round(Number(d.settings.max_steps) || 30), 500));
+      $("#f-plan").checked = d.settings.plan_mode === true;
+      $("#f-theme").value = d.settings.theme_mode || "auto";
+      $("#f-samples").value = Array.isArray(d.settings.samples)
+        ? d.settings.samples.map(chipPrompt).join("\n") : "";
+      syncSteps();
+      var tr = $("#test-result"); tr.className = "test-result"; tr.textContent = "";
+      $("#mask").classList.add("show");
+    }).catch(function () { toast("读取设置失败"); });
+  }
+
+  /* 步数输入实时回显最终生效值(与 agent.py 的 max(5, min(v, 500)) 钳制口径一致) */
+  var stepsInput = $("#f-steps");
+  function syncSteps() {
+    var v = Math.max(5, Math.min(Math.round(parseInt(stepsInput.value, 10) || 30), 500));
+    stepsInput.value = v;
+    var hint = $("#f-steps-hint");
+    if (hint) { hint.textContent = "当前生效:" + v + " 步 · 简单任务 20–30 足够,复杂任务建议 60–150。"; }
+    return v;
+  }
+  stepsInput.addEventListener("input", syncSteps);
+  stepsInput.addEventListener("blur", syncSteps);
+
+  $("#btn-settings").onclick = openSettings;
+  $("#mask").addEventListener("click", function (e) { if (e.target === $("#mask")) $("#mask").classList.remove("show"); });
+  $("#f-provider").addEventListener("change", function () {
+    var p = settingsCache.presets[this.value];
+    if (p) { $("#f-base").value = p.base_url; $("#f-model").value = p.model; }
+  });
+  $("#btn-save").onclick = function () {
+    // 桌面端按 {icon,text,prompt} 对象渲染,存回时归一化成同一形状(text=label=prompt)
+    var samples = $("#f-samples").value.split("\n").map(function (s) { return s.trim(); })
+                   .filter(function (s) { return s; })
+                   .map(function (s) { return { icon: "\uEA80", text: s, prompt: s }; });
+    fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: $("#f-provider").value, base_url: $("#f-base").value.trim(),
+                             model: $("#f-model").value.trim(), api_key: $("#f-key").value.trim(),
+                             max_steps: syncSteps(), plan_mode: $("#f-plan").checked,
+                             theme_mode: $("#f-theme").value,
+                             samples: samples.length ? samples : null })
+    }).then(function () { $("#mask").classList.remove("show"); toast("设置已保存"); pollStatus(); loadSamples(); });
+  };
+
+  /* 示例快捷指令与桌面端共用 config.samples:桌面端存的是对象数组
+     {icon, text, prompt},侧边栏编辑器按「提示词一行一条」读写,存回时也统一
+     归一化为对象,避免一端保存后另一端渲染出 [object Object]。 */
+  var DEFAULT_CHIPS_HTML = $("#chips").innerHTML;   // 内置四个指令,恢复默认时用
+  function chipLabel(t) { return (t && typeof t === "object") ? (t.text || t.prompt) : t; }
+  function chipPrompt(t) { return (t && typeof t === "object") ? (t.prompt || t.text) : t; }
+  function bindChips() {
+    Array.prototype.forEach.call(document.querySelectorAll("#chips .chip"), function (c) {
+      // textContent 会带上图标字符,所以用「包含匹配」而非全等来定位 key
+      c.onclick = function () {
+        var raw = c.textContent.trim();
+        var key = null;
+        Object.keys(CHIP_PROMPTS).forEach(function (k) { if (raw.indexOf(k) >= 0) key = k; });
+        send(key ? CHIP_PROMPTS[key] : raw);
+      };
+    });
+  }
+  function applySamples(list) {
+    var wrap = $("#chips");
+    if (!list) {                                   // null:恢复内置默认
+      wrap.innerHTML = DEFAULT_CHIPS_HTML;
+      bindChips();
+      wrap.style.display = "flex";
+      return;
+    }
+    wrap.innerHTML = "";
+    list.forEach(function (t) {
+      var c = document.createElement("span");
+      c.className = "chip"; c.textContent = chipLabel(t);
+      var prompt = chipPrompt(t);
+      c.onclick = function () { send(prompt); };
+      wrap.appendChild(c);
+    });
+    wrap.style.display = list.length ? "flex" : "none";
+  }
+  function loadSamples() {
+    fetch("/api/settings").then(function (r) { return r.json(); })
+      .then(function (d) { settingsCache = d; applySamples(d.settings.samples); })
+      .catch(function () { });
+  }
+  $("#btn-test").onclick = function () {
+    var tr = $("#test-result"); tr.className = "test-result"; tr.style.display = "block";
+    tr.style.color = "var(--muted)"; tr.textContent = "测试中…";
+    fetch("/api/test_llm", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ base_url: $("#f-base").value.trim(), model: $("#f-model").value.trim(), api_key: $("#f-key").value.trim() })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      var mark = d.ok ? iconHTML(ICON.check) : iconHTML(ICON.error);
+      tr.innerHTML = mark + " ";
+      tr.appendChild(document.createTextNode(d.message || ""));
+      tr.style.color = d.ok ? "var(--ok)" : "var(--bad)";
+      tr.className = d.ok ? "test-result ok" : "test-result bad";
+    });
+  };
+
+  function reconnect() {
+    $("#pill-text").textContent = "正在连接…";
+    fetch("/api/connect", { method: "POST" }).then(function (r) { return r.json(); })
+      .then(function (d) { toast(d.connected ? "已连接 " + d.host_label : "未检测到 Excel / WPS"); pollStatus(); });
+  }
+  function launch(host) {
+    fetch("/api/launch", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host: host }) }).then(function (r) { return r.json(); })
+      .then(function (d) { toast(d.error || ("已启动 " + d.host_label)); pollStatus(); });
+  }
+  $("#pill").onclick = reconnect;
+
+  // 空状态(含按钮/示例)在「清空对话」后要整体重建,统一在这里绑定事件
+  var EMPTY_HTML = $("#empty") ? $("#empty").outerHTML : "";
+  function bindEmpty() {
+    var r = $("#btn-reconnect"), lx = $("#btn-launch-excel"), lw = $("#btn-launch-wps");
+    if (r) r.onclick = reconnect;
+    if (lx) lx.onclick = function () { launch("excel"); };
+    if (lw) lw.onclick = function () { launch("wps"); };
+    Array.prototype.forEach.call(document.querySelectorAll(".example"), function (e) {
+      e.onclick = function () { send(e.textContent); };
+    });
+  }
+  bindEmpty();
+
+  $("#btn-clear").onclick = function () {
+    if (busy) { toast("正在处理请求,请先停止再清空"); return; }
+    fetch("/api/clear", { method: "POST" }).then(function () {
+      chat.innerHTML = "";
+      window.__curCard = null;              // 旧卡片节点已移除,别再往里写事件
+      var e = document.createElement("div");
+      e.innerHTML = EMPTY_HTML;
+      var empty = e.firstElementChild;
+      if (empty) { empty.id = "empty"; chat.appendChild(empty); }
+      bindEmpty();
+      toast("对话已清空");
+    });
+  };
+
+  $("#cb-choice").onchange = function () {
+    // 选「本会话始终允许」时要求二次勾选豁免,避免手滑永久放行
+    $("#cb-remember-row").hidden = this.value !== "session";
+    $("#cb-ok").classList.toggle("cb-red", this.value === "deny");
+    $("#cb-ok").classList.toggle("cb-green", this.value !== "deny");
+  };
+  $("#cb-ok").onclick = function () {
+    var bar = $("#confirm-bar");
+    var sid = bar.dataset.sid || "";
+    var choice = $("#cb-choice").value;      // once / session / deny
+    var remember = choice === "session" && $("#cb-remember").checked;
+    bar.hidden = true;
+    if (sid) fetch("/api/confirm", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sid: sid, allowed: choice !== "deny",
+                             remember: remember }) });
+  };
+
+  // chip 的文案已不含图标(图标是独立的 .ico 元素),所以用纯文案做 key
+  var CHIP_PROMPTS = {
+    "分析这个表": "分析当前活动工作表的数据,总结关键发现和值得注意的点",
+    "生成图表": "根据当前表格的数据选一个合适的图表类型并生成图表",
+    "写同比公式": "查看表结构后,帮我写同比/环比增长公式并填充(如果表里没有合适的列,请说明需要什么)",
+    "清洗建议": "检查当前工作表的数据质量问题(空值、重复、格式不一致等)并给出清洗建议"
+  };
+  Array.prototype.forEach.call(document.querySelectorAll("#chips .chip"), function (c) {
+    // textContent 会带上图标字符,所以用「包含匹配」而非全等来定位 key
+    c.onclick = function () {
+      var raw = c.textContent.trim();
+      var key = null;
+      Object.keys(CHIP_PROMPTS).forEach(function (k) { if (raw.indexOf(k) >= 0) key = k; });
+      send(key ? CHIP_PROMPTS[key] : raw);
+    };
+  });
+
+  input.addEventListener("input", function () {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 96) + "px";
+    // 每次输入同步一次按钮外观:空闲时按有无文字切实色/提示态,忙碌中恒为停止态。
+    // 之前这里直接改 disabled,用户继续输入不会重新启用 —— 表现为「发过一条就点不了」。
+    if (!busy) setBusy(false);
+  });
+  input.addEventListener("keydown", function (e) {
+    if ((e.key === "Enter" || e.keyCode === 13) && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      var t = input.value.trim();
+      if (t && send(t)) { input.value = ""; input.style.height = "auto"; setBusy(false); }
+    }
+  });
+  $("#btn-send").onclick = function () {
+    if (busy) { stopRun(); return; }          // 忙碌时 = 停止
+    var t = input.value.trim();
+    if (t) {
+      if (send(t)) { input.value = ""; input.style.height = "auto"; setBusy(false); }
+    } else {
+      // 空输入:对齐桌面端 —— 聚焦输入框 + 提示,不再静默无反应
+      input.focus();
+      toast("先输入要对表格做的事");
+    }
+  };
+
+  pollStatus();
+  loadSamples();
+  setInterval(pollStatus, 2000);
+
+  // SSE 推送:确认请求毫秒级到达(轮询 /api/pending_confirm 保留为兜底)
+  try {
+    var ces = new EventSource("/api/confirm_events");
+    ces.onmessage = function (e) {
+      try {
+        var p = JSON.parse(e.data);
+        if (p && p.sid && p.type === "confirm" &&
+            document.getElementById("confirm-bar").hidden) {
+          surfaceConfirm(p);
+        }
+      } catch (err) { }
+    };
+  } catch (e) { /* EventSource 不可用时由轮询兜底 */ }
+  // 任务窗格重新可见 / 窗口重新聚焦:立刻刷新状态与选区,消除最长 2 秒的显示延时
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) pollStatus(); });
+  window.addEventListener("focus", pollStatus);
+})();
+</script>
+</body>
+</html>

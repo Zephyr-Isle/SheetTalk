@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Office 任务窗格加载项清单。
+
+     结构规则(实测踩过):
+     - 功能区按钮必须写进 <VersionOverrides>(taskpaneappversionoverrides)→
+       <Hosts> → <Host xsi:type="Workbook"> → <DesktopFormFactor> → <ExtensionPoint>,
+       顶层裸写 <Commands>/<ExtensionPoint> 不符合 schema,新版 Office 不渲染按钮。
+     - 控件要 xsi:type="Button";标签/提示走 Resources 的 bt:ShortStrings / bt:LongStrings。
+     - bt: 前缀属于 officeappbasictypes,在根元素声明一次即可。
+     - 改过清单内容务必递增 Version:Office 按版本缓存,版本不变会继续用旧缓存。 -->
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+           xsi:type="TaskPaneApp">
+  <Id>3d8f2a5c-71e4-4f3a-9b2d-6c8e5a7f1b90</Id>
+  <Version>1.4.0.0</Version>
+  <ProviderName>ExcelAI</ProviderName>
+  <DefaultLocale>zh-CN</DefaultLocale>
+  <DisplayName DefaultValue="表答 SheetTalk" />
+  <Description DefaultValue="在 Excel 内与 AI 对话,直接读写当前工作簿。需要在本机运行「表答 SheetTalk」桌面程序。" />
+  <IconUrl DefaultValue="http://localhost:8765/icon-32.png" />
+  <HighResolutionIconUrl DefaultValue="http://localhost:8765/icon-80.png" />
+  <SupportUrl DefaultValue="http://localhost:8765/" />
+  <AppDomains>
+    <AppDomain>http://localhost:8765</AppDomain>
+  </AppDomains>
+  <Hosts>
+    <Host Name="Workbook" />
+  </Hosts>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="http://localhost:8765/addin.html" />
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+
+  <!-- ================= 功能区按钮(「开始」选项卡最右侧「表答」组) =================
+       ShowTaskpane 是「切换」语义:点一下展开侧边栏,再点一下收起。 -->
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+                    xsi:type="VersionOverridesV1_0">
+    <Hosts>
+      <Host xsi:type="Workbook">
+        <DesktopFormFactor>
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="ExcelAi.Group.Home">
+                <Label resid="ExcelAi.GroupLabel" />
+                <Icon>
+                  <bt:Image size="16" resid="ExcelAi.Icon16" />
+                  <bt:Image size="32" resid="ExcelAi.Icon32" />
+                  <bt:Image size="80" resid="ExcelAi.Icon80" />
+                </Icon>
+                <Control xsi:type="Button" id="ExcelAi.ShowPane.Button">
+                  <Label resid="ExcelAi.ButtonLabel" />
+                  <Supertip>
+                    <Title resid="ExcelAi.ButtonTitle" />
+                    <Description resid="ExcelAi.ButtonDesc" />
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="ExcelAi.Icon16" />
+                    <bt:Image size="32" resid="ExcelAi.Icon32" />
+                    <bt:Image size="80" resid="ExcelAi.Icon80" />
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>ExcelAiPane</TaskpaneId>
+                    <SourceLocation resid="ExcelAi.PaneUrl" />
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="ExcelAi.Icon16" DefaultValue="http://localhost:8765/icon-32.png" />
+        <bt:Image id="ExcelAi.Icon32" DefaultValue="http://localhost:8765/icon-32.png" />
+        <bt:Image id="ExcelAi.Icon80" DefaultValue="http://localhost:8765/icon-80.png" />
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="ExcelAi.PaneUrl" DefaultValue="http://localhost:8765/addin.html" />
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="ExcelAi.GroupLabel" DefaultValue="表答" />
+        <bt:String id="ExcelAi.ButtonLabel" DefaultValue="AI 助手" />
+        <bt:String id="ExcelAi.ButtonTitle" DefaultValue="打开 / 关闭 表答 AI 助手" />
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="ExcelAi.ButtonDesc" DefaultValue="在 Excel 右侧打开「表答 SheetTalk」对话面板,直接读写当前工作簿。需要本机正在运行「表答 SheetTalk」桌面程序。" />
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>

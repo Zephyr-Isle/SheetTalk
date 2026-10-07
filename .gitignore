@@ -1,0 +1,17 @@
+# 本地配置含 API Key,不入库(详见 AGENTS.md 安全红线)
+config.json
+# Python / 打包(Nuitka 与 PyInstaller)/ 测试生成物
+__pycache__/
+*.pyc
+build/
+dist/
+*.build/
+*.dist/
+*.onefile-build/
+*.spec
+_gui_shot.png
+_shot_events.png
+user_quit.flag
+# 日志
+*.log
+dangerous_tools.json
