@@ -7,6 +7,11 @@
 
 简体中文 | [English](README.en.md)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Windows-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-green)
+![Excel · WPS](https://img.shields.io/badge/Excel%20·%20WPS-107c41)
+
 <img src="assets/screenshot.png" width="380" alt="SheetTalk main window">
 
 </div>
@@ -93,7 +98,7 @@ WPS install folder, add `JsApiPlugin=true` under `[support]`, save and restart W
 └──────────────────────┘
 ```
 
-The AI drives the workbook through **42 spreadsheet tools** (read/write/formulas/charts/
+The AI drives the workbook through **74 spreadsheet tools** (read/write/formulas/charts/
 formatting/sorting/find-replace/row-column insert-delete/freeze panes/merge/protection/
 pivot tables/conditional formats/hyperlinks/visibility/sheets…) via function calling; every step is streamed into the chat.
 All COM calls run serially on a dedicated thread, fully isolated from the UI. The local
@@ -105,75 +110,6 @@ service listens on `127.0.0.1:8765` only — nothing leaves your machine.
 - Python 3.10+ (verified on 3.14; not needed for the packaged build)
 - Microsoft Excel (any recent version) **or** WPS Spreadsheets
 - Any OpenAI-compatible API key (DeepSeek has free quota; Ollama works fully offline)
-
-## FAQ
-
-**Q: How is this different from Microsoft Copilot?**
-Copilot requires an M365 subscription; SheetTalk brings your own model (Chinese APIs or
-self-hosted gateways welcome) and works in WPS too.
-
-**Q: Why a standalone app instead of a pure add-in?**
-COM is the only reliable path that covers both Excel and WPS with one codebase — their
-add-in ecosystems are mutually incompatible. A native window also avoids code signing
-and HTTPS hosting.
-
-**Q: The AI made a mistake — now what?**
-Every change is a standard COM write: **Ctrl+Z** in Excel/WPS undoes it, or just tell the
-AI to revert.
-
-**Q: Which models work?**
-Anything with function calling: `deepseek-chat`, `glm-4.6`, `kimi-k2`, `qwen-plus`, …
-
-## Confirmation & Safety Model
-
-More tools means a bigger surface for the model to misuse. SheetTalk layers three controls:
-
-**1. Tool RAG: only relevant tools per turn**
-
-Sending all 74 schemas costs ~8.5K tokens per request. Instead, each turn sends
-a core set (read/write/overview/save) + the top-5 tools retrieved for your request
-+ two meta-tools (`search_tools` / `call_tool`) — about 2.6K tokens, 73% less.
-Missed retrieval is self-healing: the model searches and calls on demand.
-
-**2. Secondary confirmation for dangerous operations**
-
-Deleting sheets/rows/charts, clearing ranges, closing workbooks and structure
-protection pop an **amber confirmation bar** (banner on desktop, bar in the
-sidebar) with a Codex-style dropdown:
-
-- **Allow once** (default)
-- **Always allow this tool in this session** — requires an extra risk checkbox
-- **Deny** — the confirm button turns red; allow keeps the brand green
-
-The bar is pushed over SSE (millisecond latency) and auto-recovers after a
-page crash/reload via `/api/pending_confirm` (polling kept as fallback);
-unanswered requests auto-cancel after 180 seconds. On denial the agent
-receives "not confirmed" and offers alternatives instead of retrying.
-
-**3. Session allowlist (revocable)**
-
-"Always allow" records a scope (tool + primary argument, e.g.
-`delete_sheet:Sheet2` — a different object still confirms). The confirm bar
-can expand the session allowlist and revoke everything with one click.
-
-**Argument & whitelist defenses**
-
-- Every tool call is validated/coerced against its JSON Schema (numeric strings
-  coerced, required/enum checked) — failures never reach COM
-- `call_tool` cannot invoke whitelisted-dangerous tools (no confirmation bypass)
-- The dangerous list hot-reloads from `dangerous_tools.json` in the config
-  directory — extend it without touching code or rebuilding
-
-**4. Startup self-check**
-
-Key invariants (confirmation flow, tool registry, validation, retrieval) are
-verified at startup; failures show a red banner in the UI instead of blowing
-up mid-run.
-
-**5. Observability**
-
-app.log records the full decision chain: retrieval query and hits → every tool
-call with arguments → results → confirmation requests and user decisions.
 
 ## Security
 
@@ -194,7 +130,7 @@ excel-ai-agent/
 │   ├── web_server.py     # built-in HTTP service (sidebar page + REST/SSE, 127.0.0.1)
 │   ├── excel_bridge.py   # COM bridge (Excel/WPS dual compat, serialized)
 │   ├── agent.py          # agent loop (context injection + tool calls + events)
-│   ├── tools.py          # 15 spreadsheet tools: schema + execution
+│   ├── tools.py          # 74 spreadsheet tools: registry + tool-RAG delivery + execution
 │   ├── llm.py            # OpenAI-compatible client (SSE + function calling)
 │   ├── watcher.py        # follow-launch monitor (auto start/stop with Excel/WPS)
 │   ├── installer.py      # one-click install/uninstall (add-ins + autostart + shortcut)
@@ -211,5 +147,23 @@ excel-ai-agent/
 ├── live_demo_test.py     # live smoke test (needs Excel open)
 ├── install.py            # one-click install/uninstall CLI entry
 ├── requirements.txt
-└── build_exe.bat         # Nuitka build script
+├── build_exe.bat         # Nuitka build script
+└── LICENSE               # MIT license
 ```
+
+## Development
+
+```bash
+python selftest.py          # offline self-check: no Excel, no API key needed
+python live_demo_test.py    # end-to-end: requires Excel/WPS open (creates a demo workbook)
+python main.py --smoke      # UI smoke test: exits after ~6s and writes _gui_shot.png
+build_exe.bat               # Nuitka onefile build → dist\ExcelAI.exe (~34 MB)
+```
+
+Conventions and architecture details for contributors: see [AGENTS.md](AGENTS.md).
+
+## License
+
+Released under the [MIT License](LICENSE) — free to use, modify and redistribute, including commercially, with attribution.
+
+Copyright (c) 2026 Zephyr-Isle

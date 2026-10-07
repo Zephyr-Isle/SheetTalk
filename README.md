@@ -7,6 +7,11 @@
 
 [English](README.en.md) | 简体中文
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Windows-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-green)
+![Excel · WPS](https://img.shields.io/badge/Excel%20·%20WPS-107c41)
+
 <img src="assets/screenshot.png" width="380" alt="表答 SheetTalk 主窗口">
 
 </div>
@@ -19,6 +24,19 @@
 
 支持两种形态:**独立桌面窗口** + **表格内嵌侧边栏**(Excel 加载项 / WPS JS 加载项),
 两种形态共享同一份对话,可同时使用。
+
+## 目录
+
+- [功能](#功能)
+- [快速开始](#快速开始)
+- [Excel 内侧边栏(Office 加载项)](#excel-内侧边栏office-加载项)
+- [WPS 表格内侧边栏(WPS JS 加载项)](#wps-表格内侧边栏wps-js-加载项)
+- [工作原理](#工作原理)
+- [环境要求](#环境要求)
+- [安全说明](#安全说明)
+- [项目结构](#项目结构)
+- [开发](#开发)
+- [许可证](#许可证)
 
 ## 功能
 
@@ -90,7 +108,7 @@ API Key);首次启动会解包运行时到 `%LOCALAPPDATA%\SheetTalk\<版本>`(�
 └──────────────────────┘
 ```
 
-AI 通过 **42 个表格工具**(读取/写入/公式/图表/格式/排序/查找替换/行列插删/冻结窗格/
+AI 通过 **74 个表格工具**(读取/写入/公式/图表/格式/排序/查找替换/行列插删/冻结窗格/
 合并单元格/保护/透视表/条件格式/超链接/显隐/工作表管理等)以 function calling
 方式循环操作表格,每一步实时显示在对话里;COM 调用全部串行在专用线程,与 UI 完全隔离;
 本机服务只监听 `127.0.0.1:8765`,无任何数据外发。
@@ -101,84 +119,6 @@ AI 通过 **42 个表格工具**(读取/写入/公式/图表/格式/排序/查�
 - Python 3.10+(已在 3.14 验证;使用打包版则无需 Python)
 - Microsoft Excel(任意近期版本)**或** WPS 表格,至少安装其一
 - 任一 OpenAI 兼容大模型 API Key(DeepSeek 有免费额度;完全离线可用 Ollama)
-
-## 使用示例
-
-| 你说 | AI 做 |
-|---|---|
-| 分析一下这个表 | 读取表结构 → 统计 → 输出 Markdown 表格结论 |
-| 按 B 列从高到低排序 | 调用 sort_range 完成 |
-| 在 D 列算利润率,保留 1 位小数 | 写公式 → autofill 填充整列 → 设百分比格式 |
-| 各产品销售占比画个饼图 | 统计 + create_chart 插入图表 |
-| 表里有重复行和空值吗 | 读取检查 → 给出清洗建议或直接清洗 |
-
-## 常见问题
-
-**Q: 和微软官方 Copilot 有什么区别?**
-官方 Copilot 需要 M365 订阅;本方案自带模型、可用国产 API 或自建网关,且 WPS 也能用。
-
-**Q: 为什么是独立软件而不是加载项?**
-一套代码同时兼容 Excel 与 WPS 的唯一可靠路径就是 COM:两家都完整实现了 Excel 对象模型,
-而各自的"加载项"体系互不兼容。独立原生窗口还免去签名、HTTPS 托管等麻烦。
-
-**Q: AI 改错了怎么办?**
-表格里的修改是标准 COM 写入,Excel/WPS 里 **Ctrl+Z 即可撤销**;
-也可以直接对 AI 说"把刚才的改动改回去"。
-
-**Q: 提示"已达本轮工具步骤上限"?**
-在设置里调大「单次任务最大工具步数」(5–500),或把需求拆小一点。
-
-**Q: 哪些模型好用?**
-需要支持 function calling:推荐 `deepseek-chat`、`glm-4.6`、`kimi-k2`、`qwen-plus`。
-
-## 确认体系与安全模型
-
-工具越多,「模型乱调工具」的风险越大。表答用三层机制控制:
-
-**1. 工具 RAG:每轮只给模型相关的工具**
-
-74 个工具的 schema 全量发送会占用 8.5K tokens/轮。表答改为:
-每轮只下发「常驻核心(读写/概况/保存)+ 按你的请求检索命中的 top-5 +
-元工具(search_tools / call_tool)」,约 2.6K tokens,省 73%。
-
-- 检索命中:常见操作一步直达
-- 检索没中:模型自己 `search_tools` 找到工具再 `call_tool` 调用,不会失败
-
-**2. 危险操作二次确认(确认条)**
-
-删除工作表/删除行列/删除图表/清空区域/关闭工作簿/两级保护这类操作,
-执行前会弹出**琥珀色确认条**(桌面为横幅、侧边栏为确认条),Codex 风格下拉:
-
-- **仅本次允许执行**(默认)
-- **本会话始终允许该工具** —— 需勾选「我了解风险」二次确认,避免手滑永久放行
-- **拒绝执行** —— 确认按钮变红;允许时保持品牌绿
-
-确认条由 SSE 实时推送(毫秒级),页面崩溃/刷新后通过 `/api/pending_confirm`
-自动恢复弹出(轮询兜底);180 秒未决断自动取消。拒绝后 Agent 会收到
-「用户未确认」并给出替代方案,不会换个名字重试。
-
-**3. 会话豁免清单(可撤销)**
-
-选「始终允许」会记入会话豁免清单(作用域 = 工具名 + 主参数,例如
-`delete_sheet:Sheet2` 只豁免对 Sheet2 的删除,换一个对象仍会确认)。
-确认条底部可展开查看本会话豁免了哪些操作,并支持**一键全部撤销**。
-
-**参数与白名单防线**
-
-- 所有工具参数先按 JSON Schema 校验/纠正(数字字符串自动转数字、必填/枚举检查),失败不执行
-- `call_tool` 无法调用危险清单内的工具(防止绕过确认)
-- 危险清单支持热加载:编辑 `dangerous_tools.json`(配置目录下)即可追加,无需改代码重打包
-
-**4. 启动期自检**
-
-程序启动时验证确认流/工具注册/参数校验/检索的关键不变量,
-失败会在 UI 顶部以红色横幅明示(同时进 app.log 与侧边栏),
-把「运行时才炸」的隐患提前到启动期暴露。
-
-**5. 可观测性**
-
-app.log 记录完整决策链:检索 query 与命中列表 → 每次工具调用的名称与参数 →
-执行结果 → 二次确认请求与用户决定,可事后审计模型的每一步。
 
 ## 安全说明
 
@@ -198,7 +138,7 @@ excel-ai-agent/
 │   ├── web_server.py     # 内置 HTTP 服务(侧边栏页面 + REST/SSE,仅 127.0.0.1)
 │   ├── excel_bridge.py   # COM 桥接层(Excel/WPS 双兼容,单线程串行化)
 │   ├── agent.py          # Agent 循环(上下文注入 + 工具调用 + 事件流)
-│   ├── tools.py          # 15 个表格工具的 schema 与执行
+│   ├── tools.py          # 74 个表格工具:全量注册表 + 工具 RAG 下发 + 执行
 │   ├── llm.py            # OpenAI 兼容客户端(SSE 流式 + function calling)
 │   ├── watcher.py        # 跟随启动监控(检测 Excel/WPS 自动拉起/收起)
 │   ├── installer.py      # 一键安装/卸载(加载项 + 自启 + 快捷方式)
@@ -215,5 +155,23 @@ excel-ai-agent/
 ├── live_demo_test.py     # 真机冒烟测试(需要打开 Excel)
 ├── install.py            # 一键安装/卸载命令行入口
 ├── requirements.txt
-└── build_exe.bat         # Nuitka 打包脚本
+├── build_exe.bat         # Nuitka 打包脚本
+└── LICENSE               # MIT 许可证
 ```
+
+## 开发
+
+```bash
+python selftest.py          # 离线自检:不需 Excel、不需 API Key
+python live_demo_test.py    # 真机端到端:需先打开 Excel/WPS(会新建演示工作簿)
+python main.py --smoke      # UI 冒烟:启动约 6 秒后自动退出并截图 _gui_shot.png
+build_exe.bat               # Nuitka onefile 打包 → dist\ExcelAI.exe(约 34MB)
+```
+
+改动约定与架构细节见 [AGENTS.md](AGENTS.md)(给 AI 编码代理与贡献者的项目说明)。
+
+## 许可证
+
+本项目以 [MIT 许可证](LICENSE) 开源 —— 可自由使用、修改、分发,商用亦可,保留版权声明即可。
+
+Copyright (c) 2026 Zephyr-Isle
