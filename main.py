@@ -33,6 +33,8 @@ def main():
     parser.add_argument("--smoke", action="store_true", help="启动数秒后自动退出(冒烟测试)")
     parser.add_argument("--smoke-dialog", action="store_true",
                         help="冒烟测试时自动打开设置对话框(截图用)")
+    parser.add_argument("--smoke-chat", action="store_true",
+                        help="冒烟测试时自动发一条只读演示消息,回复完成后自截(README 截图用)")
     parser.add_argument("--watch", action="store_true",
                         help="跟随启动:检测到 Excel/WPS 表格在运行时拉起主程序后退出")
     parser.add_argument("--watch-guard", action="store_true",
@@ -50,7 +52,10 @@ def main():
         return
 
     from app.qt_app import run_qt_app
-    sys.exit(run_qt_app(smoke_timeout=6000 if (args.smoke or args.smoke_dialog) else 0))
+    smoke = 6000 if (args.smoke or args.smoke_dialog) else 0
+    if args.smoke_chat:
+        smoke = 40000   # 演示对话要等 LLM 回复完成,窗口期放长
+    sys.exit(run_qt_app(smoke_timeout=smoke))
 
 
 if __name__ == "__main__":

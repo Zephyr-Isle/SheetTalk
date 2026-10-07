@@ -345,9 +345,14 @@ class Controller(QObject):
                 llm.chat_completions(base_url, api_key, model,
                                      [{"role": "user", "content": "回复:ok"}],
                                      max_tokens=8, timeout=30)
-                self.testFinished.emit(True, "✓ 连接成功")
+                ok, msg = True, "✓ 连接成功"
             except llm.LLMError as e:
-                self.testFinished.emit(False, "✗ " + str(e)[:300])
+                ok, msg = False, "✗ " + str(e)[:300]
+            except Exception as e:
+                # 未归类异常(网络/编码等)也必须回执,否则界面按钮会永远停在「测试中…」
+                ok, msg = False, "✗ " + str(e)[:300]
+            if not self._quitting:
+                self.testFinished.emit(ok, msg)
         threading.Thread(target=work, daemon=True).start()
 
     def shutdown(self):

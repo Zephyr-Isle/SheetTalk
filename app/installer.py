@@ -173,7 +173,8 @@ def install_all():
     if problems:
         return False, "部分步骤未完成:" + ";".join(problems)
     return True, ("安装完成:Excel/WPS 工具栏按钮 + 开机自启 + 桌面快捷方式。"
-                  "重启 Excel/WPS 后即可在功能区看到「表答」。")
+                  "重启 Excel/WPS 后若功能区还没出现「表答」,在 Excel 里点"
+                  "「插入 → 获取加载项 → 共享文件夹 → 添加」一次即可。")
 
 
 def remove_all():

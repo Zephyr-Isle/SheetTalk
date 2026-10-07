@@ -391,6 +391,9 @@ ApplicationWindow {
     Component.onCompleted: {
         // 默认落点:当前屏幕的右侧居中。必须加上屏幕原点(virtualX/virtualY):
         // 多显示器时副屏原点不是 (0,0),直接用 desktopAvailableWidth 会落错屏
+        // 屏幕装不下默认高度时先收窄,避免窗口整体溢出屏幕(如 1080p/125%)
+        if (isFinite(Screen.desktopAvailableHeight) && Screen.desktopAvailableHeight > 0)
+            height = Math.max(minimumHeight, Math.min(920, Screen.desktopAvailableHeight - 16))
         x = Screen.virtualX + Screen.desktopAvailableWidth - width - 20
         y = Screen.virtualY + Math.max(0, (Screen.desktopAvailableHeight - height) / 2 - 24)
         var s = ctrl.loadSettings()
@@ -413,15 +416,35 @@ ApplicationWindow {
         else if (Qt.application.arguments.indexOf("--smoke-dialog") >= 0) settingsDialog.openNormal()
     }
 
-    // 窗口落点保护:显示后把窗口钳回当前屏幕的可见区域。
-    // 背景:预显示阶段设置的坐标在 DPI 缩放(125%/150%)下会被二次换算,
-    // 窗口会整体落到屏幕外(标题栏不可达,只能靠 Alt+Tab 救)。显示完成后再
-    // 校正一次,落点一定可见;若用户自己把窗口拖到副屏也只在下次启动时校正。
-    onVisibleChanged: if (visible) Qt.callLater(win.clampIntoScreen)
+    // 窗口落点保护:显示后反复把窗口钳回当前屏幕的可见区域。
+    // 背景:预显示阶段设置的坐标在 DPI 缩放(125%/150%/200%)下会被二次换算,
+    // 窗口会整体落到屏幕外(标题栏不可达,只能靠 Alt+Tab 救);实测单次钳制还会
+    // 抢在窗口管理器真正摆放窗口之前执行,被随后的摆放覆盖 —— 所以显示后按
+    // 0/250/500/750/1000/1500ms 连续钳几次,最后一次一定落在最终位置之后。
+    onVisibleChanged: if (visible) win.scheduleClamp()
+
+    function scheduleClamp() {
+        clampIntoScreen()
+        clampTicks = 6
+        clampTimer.restart()
+    }
+
+    property int clampTicks: 0
+    Timer {
+        id: clampTimer
+        interval: 250
+        repeat: true
+        onTriggered: {
+            win.clampIntoScreen()
+            win.clampTicks = win.clampTicks - 1
+            if (win.clampTicks <= 0) stop()
+        }
+    }
 
     function clampIntoScreen() {
         var sx = Screen.virtualX, sy = Screen.virtualY
         var aw = Screen.desktopAvailableWidth, ah = Screen.desktopAvailableHeight
+        // 指标还没就绪时本次跳过(下次 tick 还会再来),不能就此放弃
         if (!isFinite(sx) || !isFinite(sy) || !isFinite(aw) || !isFinite(ah) || aw <= 0) return
         var minX = sx + 4, maxX = Math.max(minX, sx + aw - width - 4)
         var minY = sy + 4, maxY = Math.max(minY, sy + ah - 56)  // 56:给标题栏留出可拖拽高度
@@ -540,8 +563,10 @@ ApplicationWindow {
             }
         }
         function onTestFinished(ok, msg) {
-            testResult.text = msg
-            testResult.color = ok ? win.okColor : win.badColor
+            settingsDialog.testing = false
+            settingsDialog.testOk = ok
+            settingsDialog.testMsg = msg
+            testDialog.open()
         }
         function onStatusChanged() {
             if (settingsDialog.visible && !ctrl.installBusy) {
@@ -1648,8 +1673,30 @@ ApplicationWindow {
         width: Math.min(win.width - 36, 420)
         padding: 18
         closePolicy: Popup.CloseOnEscape
-        // 内容变多(示例按钮管理)时限制高度,超出部分在 ScrollView 里滚动
-        height: Math.min(settingsCol.implicitHeight + padding * 2, win.height - 80)
+        // 头/尾固定、中间滚动:内容超出窗口高度时,只有中间的设置区缩放并出现
+        // 滚动条,标题(关闭按钮)与底部保存按钮始终可见可点。
+        readonly property int shellHeight: settingsHeader.implicitHeight + settingsFooter.implicitHeight
+        readonly property int maxMiddle: win.height - 80 - shellHeight - padding * 2
+        readonly property int middleHeight: Math.max(160, Math.min(settingsCol.implicitHeight, maxMiddle))
+        height: shellHeight + middleHeight + padding * 2
+
+        property bool testing: false      // 测试连接进行中(按钮变「测试中…」)
+        property bool testOk: false       // 最近一次测试结果
+        property string testMsg: ""
+        // 测试连接超时兜底:llm 侧 30s 超时,35s 仍未回执就恢复按钮并弹超时提示,
+        // 避免网络异常时按钮永远停在「测试中…」。
+        Timer {
+            id: testGuard
+            interval: 35000
+            onTriggered: {
+                if (!settingsDialog.testing) return
+                settingsDialog.testing = false
+                settingsDialog.testOk = false
+                settingsDialog.testMsg = qsTr("测试超时,请检查网络或接口地址")
+                testDialog.open()
+            }
+        }
+
         background: Rectangle {
             // Fluent 对话框:8px 圆角 + 分隔描边 + 柔和阴影
             radius: win.rCard
@@ -1701,22 +1748,15 @@ ApplicationWindow {
             settingsDialog._watchGuard = true
             try { watchSwitch.checked = ctrl.watchEnabled } catch (e) {}
             settingsDialog._watchGuard = false
-            testResult.text = ""
             open()
         }
 
-        contentItem: ScrollView {
-            id: settingsScroll
-            clip: true
-            contentWidth: availableWidth
-            ScrollBar.vertical: FluScrollBar { id: settingsBar }
+        contentItem: ColumnLayout {
+            spacing: 12
 
-            ColumnLayout {
-                id: settingsCol
-                width: settingsScroll.availableWidth
-                spacing: 14
-
+            // 固定头部:标题 + 关闭按钮(不随内容滚动)
             RowLayout {
+                id: settingsHeader
                 spacing: 8
                 Layout.fillWidth: true
                 FluIcon {
@@ -1739,6 +1779,20 @@ ApplicationWindow {
                     onClicked: settingsDialog.close()
                 }
             }
+
+            // 中间:唯一可滚动的区域(全部设置项)
+            ScrollView {
+                id: settingsScroll
+                Layout.fillWidth: true
+                Layout.preferredHeight: settingsDialog.middleHeight
+                clip: true
+                contentWidth: availableWidth
+                ScrollBar.vertical: FluScrollBar { id: settingsBar }
+
+                ColumnLayout {
+                    id: settingsCol
+                    width: settingsScroll.availableWidth
+                    spacing: 14
 
             Label { text: qsTr("服务商预设"); font.pixelSize: 12; color: win.subText }
             ComboBox {
@@ -2061,41 +2115,107 @@ ApplicationWindow {
                 }
             }
 
-            Label {
-                id: testResult
-                font.pixelSize: 12
-                wrapMode: Text.WrapAnywhere
-                Layout.fillWidth: true
-                visible: text !== ""
-            }
+                } // settingsCol
+            }     // ScrollView
 
+            // 固定底部:测试连接 + 保存(不随内容滚动,永远在对话框底部)
             RowLayout {
+                id: settingsFooter
                 spacing: 10
                 Layout.alignment: Qt.AlignRight
-                Layout.topMargin: 4
+                Layout.fillWidth: true
 
                 FluSecondaryButton {
-                    text: qsTr("测试连接")
-                    onClicked: ctrl.testLlm(baseField.text, modelField.text, keyField.text)
+                    // 点击后立即变「测试中…」并禁用,给出明确的进行中反馈
+                    text: settingsDialog.testing ? qsTr("测试中…") : qsTr("测试连接")
+                    enabled: !settingsDialog.testing
+                    onClicked: {
+                        settingsDialog.testing = true
+                        testGuard.restart()
+                        ctrl.testLlm(baseField.text, modelField.text, keyField.text)
+                    }
                 }
                 FluFilledButton {
                     text: qsTr("保存")
                     onClicked: {
-                        ctrl.saveSettings(presetKeys[providerBox.currentIndex] || "custom",
-                                          baseField.text, modelField.text, keyField.text,
-                                          stepsSpin.value, planSwitch.checked)
-                        settingsDialog.close()
-                        win.toast(qsTr("设置已保存"))
+                        var saved = true
+                        try {
+                            ctrl.saveSettings(presetKeys[providerBox.currentIndex] || "custom",
+                                              baseField.text, modelField.text, keyField.text,
+                                              Math.round(stepsSpin.value), planSwitch.checked)
+                        } catch (e) {
+                            saved = false
+                            win.toast(qsTr("保存失败:") + e)
+                        }
+                        if (saved) {
+                            settingsDialog.close()
+                            win.toast(qsTr("设置已保存"))
+                        }
                     }
                 }
             }
-            } // settingsCol
-        }     // ScrollView
+        }     // contentItem(ColumnLayout)
+    }
+
+    // ---------------- 测试连接结果弹窗 ----------------
+    Dialog {
+        id: testDialog
+        z: 160
+        modal: true
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(win.width - 48, 380)
+        padding: 20
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle {
+            radius: win.rCard
+            color: win.layerColor
+            border.width: 1
+            border.color: win.stroke
+        }
+        contentItem: ColumnLayout {
+            spacing: 14
+            RowLayout {
+                spacing: 8
+                Layout.fillWidth: true
+                FluIcon {
+                    text: settingsDialog.testOk ? win.icoCheck : win.icoError
+                    font.pixelSize: 16
+                    color: settingsDialog.testOk ? win.okColor : win.badColor
+                }
+                Label {
+                    text: settingsDialog.testOk ? qsTr("连接成功") : qsTr("连接失败")
+                    font.pixelSize: 14
+                    font.weight: Font.DemiBold
+                    color: win.textColor
+                    Layout.fillWidth: true
+                }
+            }
+            Label {
+                text: settingsDialog.testMsg
+                font.pixelSize: 12
+                color: win.subText
+                wrapMode: Text.Wrap
+                maximumLineCount: 8
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                FluFilledButton {
+                    text: qsTr("确定")
+                    onClicked: testDialog.close()
+                }
+            }
+        }
     }
 
     // ---------------- Toast ----------------
+    // z 必须高于设置对话框(100)与遮罩(90):一键安装/测试等结果 toast 往往在
+    // 设置弹窗打开期间返回,层级低会被对话框整个盖住(「点了没反应」的元凶)。
     Rectangle {
         id: toast
+        z: 200
         property bool shown: false
         anchors.bottom: parent.bottom
         anchors.bottomMargin: 110

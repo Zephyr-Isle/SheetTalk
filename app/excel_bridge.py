@@ -248,17 +248,101 @@ class ExcelBridge:
         return self._pinned
 
     def connect(self):
-        """探测正在运行的 Excel / WPS,成功返回 True。"""
+        """探测正在运行的 Excel / WPS,成功返回 True。
+
+        多开场景(几十个无工作簿的后台实例)下,GetActiveObject 拿到的往往是
+        「第一个注册进 ROT」的实例 —— 它可能一个工作簿都没开,界面就会一直
+        显示「无工作簿」。所以拿到后再去 ROT 里找「带工作簿」的实例,找到就换过去。
+        """
         for kind, progid, label in HOSTS:
             try:
                 app = self.worker.submit(
                     lambda p=progid: win32com.client.GetActiveObject(p), timeout=10)
             except Exception:
                 continue
+            try:
+                better = self.worker.submit(lambda a=app: self._rot_pick(a), timeout=10)
+                if better is not None:
+                    app = better
+            except Exception:
+                pass
             self.app, self.host_kind, self.host_label = app, kind, label
+            return True
+        # 快速路径全失败(如 class moniker 失效):兜底扫 ROT,带工作簿的实例优先
+        try:
+            app = self.worker.submit(
+                lambda: self._rot_pick(None, require_workbook=False), timeout=10)
+        except Exception:
+            app = None
+        if app is not None:
+            self.app = app
+            self.host_kind, self.host_label = self._kind_of(app)
             return True
         self.app = self.host_kind = self.host_label = None
         return False
+
+    def _rot_pick(self, current=None, require_workbook=True):
+        """在 ROT 里挑一个表格实例:优先「带打开工作簿」的。
+
+        为什么必须扫 ROT:GetActiveObject 只会返回 class moniker 绑定的那一个
+        实例;每个 Excel/WPS 实例还会用「文档 moniker」注册进 ROT,只有遍历 ROT
+        并 QueryInterface(IID_IDispatch) 才能拿到它们(直接把 PyIUnknown 丢给
+        win32com.client.Dispatch 会报 GetTypeInfo 错)。没有 Workbooks 属性的对象
+        (Word、Shell 等)读取时会抛异常,一律跳过。
+        """
+        if current is not None:
+            try:
+                if int(current.Workbooks.Count) >= 1:
+                    return current
+            except Exception:
+                pass
+        try:
+            rot = pythoncom.GetRunningObjectTable()
+            enum = rot.EnumRunning()
+            any_app = None
+            for _ in range(64):     # ROT 条目通常个位数,64 足够且有界
+                mons = enum.Next(1)
+                if not mons:
+                    break
+                mon = mons[0] if isinstance(mons, (list, tuple)) else mons
+                try:
+                    disp = rot.GetObject(mon).QueryInterface(pythoncom.IID_IDispatch)
+                    cand = win32com.client.Dispatch(disp).Application
+                    wc = int(cand.Workbooks.Count)
+                except Exception:
+                    continue
+                if wc >= 1:
+                    return cand
+                if any_app is None:
+                    any_app = cand
+            if require_workbook:
+                return None
+            return any_app
+        except Exception:
+            return None
+
+    @staticmethod
+    def _kind_of(app):
+        """由 Application.Name 判断宿主(ROT 兜底路径拿不到 progid 时用)。"""
+        try:
+            name = str(app.Name or "")
+        except Exception:
+            name = ""
+        if "WPS" in name.upper():
+            return "wps", "WPS 表格"
+        return "excel", "Microsoft Excel"
+
+    def _switch_to_workbook(self):
+        """当前实例没开着工作簿 → 切到 ROT 里「带工作簿」的实例;切不动返回 False。"""
+        try:
+            cand = self.worker.submit(lambda: self._rot_pick(self.app), timeout=10)
+        except Exception:
+            return False
+        if cand is None or cand is self.app:
+            return False
+        self.app = cand
+        self.host_kind, self.host_label = self._kind_of(cand)
+        return True
 
     def ensure(self):
         if self.app is not None and self._alive():
@@ -316,17 +400,33 @@ class ExcelBridge:
         try:
             info = self.worker.submit(self._snapshot, timeout=20)
         except BridgeError as e:
-            # 例如:用户指定的工作簿已被关闭 —— 要把原因带给界面,而不是笼统说「没连上」
-            return {"connected": True, "host": self.host_kind, "host_label": self.host_label,
-                    "workbook": None, "sheets": [], "active_sheet": None, "selection": None,
-                    "open_workbooks": [], "app_visible": None, "note": str(e)}
+            # 用户指定的工作簿已关闭等原因 → 原样透出;若只是「当前实例没开着
+            # 工作簿」,先试着切到带工作簿的实例再快照一次(多开时 GetActiveObject
+            # 经常连到无工作簿的后台实例 —— 这是「检测不到工作簿」的主修复路径)
+            if "没有打开的工作簿" in str(e) and self._switch_to_workbook():
+                try:
+                    info = self.worker.submit(self._snapshot, timeout=20)
+                except Exception as e2:
+                    return self._no_workbook(str(e2))
+            else:
+                return self._no_workbook(str(e))
         except Exception:
-            return {"connected": True, "host": self.host_kind, "host_label": self.host_label,
-                    "workbook": None, "sheets": [], "active_sheet": None, "selection": None,
-                    "open_workbooks": [], "app_visible": None, "note": "没有打开的工作簿"}
+            if self._switch_to_workbook():
+                try:
+                    info = self.worker.submit(self._snapshot, timeout=20)
+                except Exception:
+                    return self._no_workbook("没有打开的工作簿")
+            return self._no_workbook("没有打开的工作簿")
         info.update({"connected": True, "host": self.host_kind, "host_label": self.host_label,
                     "pinned": self._pinned})
         return info
+    def _no_workbook(self, note):
+        """连上了表格程序但拿不到工作簿时的统一返回(note 供界面提示原因)。"""
+        return {"connected": True, "host": self.host_kind, "host_label": self.host_label,
+                "workbook": None, "sheets": [], "active_sheet": None, "selection": None,
+                "open_workbooks": [], "app_visible": None, "note": note}
+
+
 
     # ---------- 内部工具 ----------
 
