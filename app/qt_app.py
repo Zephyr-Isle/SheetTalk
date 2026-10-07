@@ -4,6 +4,41 @@ import logging
 import os
 import sys
 
+# 诊断探针:打包态下 PySide6 绑定缺依赖时,抛出的往往是裸 ImportError(细节被
+# shiboken/libpyside 吞掉),这里逐个导入把真凶与完整异常链打到 stderr,
+# 便于排查"打包后启动即崩"。正常环境无副作用:这些模块随后本来就会被导入。
+import traceback as _tb
+
+# 诊断探针:打包态下 PySide6 绑定缺依赖时,抛出的往往是裸 ImportError(细节被
+# shiboken/libpyside 吞掉),这里逐个导入把真凶与完整异常链打到 stderr,
+# 便于排查"打包后启动即崩"。正常环境无副作用:这些模块随后本来就会被导入。
+import ctypes as _ct
+
+
+def _probe_loadlib(tag):
+    _p = os.path.join(os.path.dirname(__import__("PySide6").__file__), "QtQuick.pyd")
+    try:
+        _ct.WinDLL(_p)
+        sys.stderr.write("[probe:%s] LoadLibrary QtQuick.pyd OK\n" % tag)
+        return True
+    except OSError as _e:
+        sys.stderr.write("[probe:%s] LoadLibrary QtQuick.pyd FAIL: %r\n" % (tag, _e))
+        return False
+
+
+_probe_loadlib("fresh")   # 任何 PySide6 绑定导入之前:纯净进程状态
+
+for _mod in ("QtCore", "QtGui", "QtNetwork", "QtOpenGL", "QtQml", "QtQuick",
+             "QtQuickControls2", "QtWidgets"):
+    try:
+        __import__("PySide6." + _mod)
+        if _mod in ("QtQml", "QtOpenGL", "QtNetwork"):
+            _probe_loadlib("after-" + _mod)
+    except Exception as _e:
+        sys.stderr.write("[probe] PySide6.%s FAIL repr=%r args=%r winerror=%r cause=%r\n"
+                         % (_mod, _e, _e.args, getattr(_e, "winerror", None),
+                            repr(_e.__cause__)[:200]))
+
 from PySide6.QtCore import QTimer, QUrl, Qt
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QIcon,
                          QLinearGradient, QPainter, QPen, QPixmap)

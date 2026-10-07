@@ -25,7 +25,11 @@ def is_frozen():
 
 
 def exe_dir():
-    """程序所在目录:打包态返回 exe 所在目录,开发态返回项目根目录。"""
-    if is_frozen():
-        return os.path.dirname(os.path.abspath(sys.executable))
+    """程序所在目录:打包态返回 exe 所在目录,开发态返回项目根目录。
+
+    打包态用 __file__ 而不是 sys.executable:standalone 下二者等价
+    (编译模块的 __file__ 指向 exe 旁的虚拟路径),但 Nuitka onefile 下
+    sys.executable 指向启动器原 exe,而 qml/addin/assets 等数据文件被
+    解包到运行目录 —— 只有 __file__ 指向数据真正所在的位置。
+    """
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -119,6 +119,9 @@ ApplicationWindow {
         implicitWidth: 30
         implicitHeight: 30
         hoverEnabled: true
+        // Fluent 触觉确认:按下轻微压缩;键盘焦点给描边(禁止忽略焦点状态)
+        scale: ctl.down ? 0.92 : 1.0
+        Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
         contentItem: FluIcon {
             text: ctl.glyph
             font.pixelSize: ctl.glyphSize
@@ -127,10 +130,14 @@ ApplicationWindow {
         background: Rectangle {
             radius: win.rControl
             color: ctl.down ? Qt.rgba(0, 0, 0, 0.08)
-                 : ctl.hovered ? (win.dark ? Qt.rgba(1, 1, 1, 0.07) : Qt.rgba(0, 0, 0, 0.05))
+                 : (ctl.hovered || ctl.activeFocus) ? (win.dark ? Qt.rgba(1, 1, 1, 0.07) : Qt.rgba(0, 0, 0, 0.05))
                  : "transparent"
+            border.width: ctl.activeFocus ? 1 : 0
+            border.color: win.accent
             Behavior on color { ColorAnimation { duration: 120 } }
         }
+        // 手型光标:图标动作都是可点击的
+        MouseArea { anchors.fill: parent; acceptedButtons: Qt.NoButton; cursorShape: Qt.PointingHandCursor }
     }
 
     // 次要按钮:透明底 + 描边,悬浮时轻微着色
@@ -140,6 +147,9 @@ ApplicationWindow {
         implicitWidth: Math.max(88, contentItem.implicitWidth + 28)
         font.pixelSize: 13
         hoverEnabled: true
+        // Fluent 触觉确认:按下压缩到 0.97
+        scale: ctl.down ? 0.97 : 1.0
+        Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
         contentItem: Label {
             text: ctl.text
             font.pixelSize: 13
@@ -153,10 +163,14 @@ ApplicationWindow {
             color: ctl.down ? Qt.rgba(0.06, 0.49, 0.25, 0.20)
                  : ctl.hovered ? (win.dark ? Qt.rgba(1, 1, 1, 0.06) : Qt.rgba(0, 0, 0, 0.04))
                  : "transparent"
-            border.width: ctl.enabled ? 1 : 0
-            border.color: ctl.enabled ? (ctl.hovered ? win.strokeStrong : win.stroke) : "transparent"
+            border.width: !ctl.enabled ? 0 : (ctl.activeFocus ? 2 : 1)
+            border.color: !ctl.enabled ? "transparent"
+                         : ctl.activeFocus ? win.accent
+                         : (ctl.hovered ? win.strokeStrong : win.stroke)
             Behavior on color { ColorAnimation { duration: 120 } }
         }
+        // 手型光标:次要按钮也是动作入口
+        MouseArea { anchors.fill: parent; acceptedButtons: Qt.NoButton; cursorShape: Qt.PointingHandCursor }
     }
 
     // 强调按钮:实心强调色 + 悬浮/按下加深
@@ -169,6 +183,9 @@ ApplicationWindow {
         implicitWidth: Math.max(88, contentItem.implicitWidth + 28)
         font.pixelSize: 13
         hoverEnabled: true
+        // Fluent 触觉确认:同次要按钮(0.97 按压)
+        scale: ctl.down ? 0.97 : 1.0
+        Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
         contentItem: Label {
             text: ctl.text
             font.pixelSize: 13
@@ -183,8 +200,13 @@ ApplicationWindow {
                  : ctl.down ? ctl.bgDown
                  : ctl.hovered ? ctl.bgHovered
                  : ctl.bgColor
+            // 键盘焦点:WinUI 风格的 2px 内描边(实心底上用白环更醒目)
+            border.width: ctl.activeFocus ? 2 : 0
+            border.color: "#ffffff"
             Behavior on color { ColorAnimation { duration: 120 } }
         }
+        // 手型光标:强调按钮同样可点
+        MouseArea { anchors.fill: parent; acceptedButtons: Qt.NoButton; cursorShape: Qt.PointingHandCursor }
     }
 
     // 数字微调框:Fluent 的纤细 ± 按钮(默认 Basic 风格的深灰实心块太重)
@@ -266,9 +288,9 @@ ApplicationWindow {
         contentItem: Rectangle {
             implicitWidth: 6
             radius: 3
-            color: ctl.pressed ? Qt.rgba(0, 0, 0, 0.45)
-                 : ctl.hovered ? Qt.rgba(0, 0, 0, 0.32)
-                 : Qt.rgba(0, 0, 0, 0.16)
+            color: ctl.pressed ? (win.dark ? Qt.rgba(1, 1, 1, 0.50) : Qt.rgba(0, 0, 0, 0.45))
+                 : ctl.hovered ? (win.dark ? Qt.rgba(1, 1, 1, 0.36) : Qt.rgba(0, 0, 0, 0.32))
+                 : (win.dark ? Qt.rgba(1, 1, 1, 0.22) : Qt.rgba(0, 0, 0, 0.16))
             Behavior on color { ColorAnimation { duration: 130 } }
             opacity: ctl.policy === ScrollBar.AlwaysOn || ctl.active || ctl.hovered ? 1.0 : 0.0
             Behavior on opacity { NumberAnimation { duration: 160 } }
@@ -282,6 +304,9 @@ ApplicationWindow {
         implicitWidth: 30
         implicitHeight: 30
         hoverEnabled: true
+        // Fluent 触觉确认 + 键盘焦点描边(与 FluIconAction 同款)
+        scale: ctl.down ? 0.92 : 1.0
+        Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
         contentItem: Label {
             text: ctl.text
             font.pixelSize: 14
@@ -292,10 +317,14 @@ ApplicationWindow {
         background: Rectangle {
             radius: win.rControl
             color: ctl.down ? Qt.rgba(0, 0, 0, 0.08)
-                 : ctl.hovered ? (win.dark ? Qt.rgba(1, 1, 1, 0.07) : Qt.rgba(0, 0, 0, 0.05))
+                 : (ctl.hovered || ctl.activeFocus) ? (win.dark ? Qt.rgba(1, 1, 1, 0.07) : Qt.rgba(0, 0, 0, 0.05))
                  : "transparent"
+            border.width: ctl.activeFocus ? 1 : 0
+            border.color: win.accent
             Behavior on color { ColorAnimation { duration: 120 } }
         }
+        // 手型光标:同 FluIconAction,所有透明底图标按钮都可点击
+        MouseArea { anchors.fill: parent; acceptedButtons: Qt.NoButton; cursorShape: Qt.PointingHandCursor }
     }
 
     // 开关:Win11 的「拨杆」样式,滑块用强调色
@@ -553,6 +582,16 @@ ApplicationWindow {
         contentItem: RowLayout {
             spacing: 8
 
+            // 应用图标:与 exe / 托盘 / 快捷方式同一份资源,顶栏更有产品感
+            Image {
+                source: "../assets/icon.png"
+                Layout.preferredWidth: 18
+                Layout.preferredHeight: 18
+                fillMode: Image.PreserveAspectFit
+                smooth: true
+                mipmap: true
+                asynchronous: true
+            }
             Label {
                 text: qsTr("表答 SheetTalk")
                 font.pixelSize: 14
@@ -568,14 +607,26 @@ ApplicationWindow {
                 implicitHeight: 28
                 Layout.maximumWidth: 220
                 hoverEnabled: true
+                // Fluent 触觉:按下压缩反馈(此胶囊可点击重连)
+                scale: statusPill.down ? 0.97 : 1.0
+                Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                 onClicked: ctrl.reconnect()
                 contentItem: RowLayout {
                     spacing: 6
                     Rectangle {
+                        id: statusDot
                         Layout.preferredWidth: 7
                         Layout.preferredHeight: 7
                         radius: 3.5
                         color: ctrl.connected ? win.okColor : (ctrl.warnState ? win.warnColor : win.badColor)
+                        // 未连接时呼吸闪烁,提示「这里可以点一下重连」;恢复后回满不透明
+                        SequentialAnimation {
+                            running: !ctrl.connected
+                            loops: Animation.Infinite
+                            NumberAnimation { target: statusDot; property: "opacity"; to: 0.35; duration: 700; easing.type: Easing.InOutSine }
+                            NumberAnimation { target: statusDot; property: "opacity"; to: 1.0; duration: 700; easing.type: Easing.InOutSine }
+                            onStopped: statusDot.opacity = 1.0
+                        }
                     }
                     Label {
                         text: ctrl.statusLine
@@ -592,6 +643,7 @@ ApplicationWindow {
                     border.color: win.stroke
                     Behavior on color { ColorAnimation { duration: 120 } }
                 }
+                MouseArea { anchors.fill: parent; acceptedButtons: Qt.NoButton; cursorShape: Qt.PointingHandCursor }
             }
             FluIconAction {
                 glyph: win.icoClear
@@ -661,6 +713,14 @@ ApplicationWindow {
         footer: Item { width: chatList.width; height: 12 }
         ScrollBar.vertical: FluScrollBar { }
 
+        // 新消息淡入:轻量不干扰流式期间跟随底部;populate 覆盖历史恢复时的批量创建
+        add: Transition {
+            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 140 }
+        }
+        populate: Transition {
+            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 140 }
+        }
+
         property bool follow: true
         onAtYEndChanged: follow = atYEnd
         onCountChanged: if (follow) Qt.callLater(positionViewAtEnd)
@@ -681,9 +741,12 @@ ApplicationWindow {
                         anchors.rightMargin: 14
                         width: Math.min(parent.width * 0.82, userCol.implicitWidth + 30)
                         height: userCol.implicitHeight + 22
-                        // Fluent:用户气泡用实心强调色 + 8px 圆角
+                        // Fluent:用户气泡用强调色纵向渐变 + 8px 圆角(与侧边栏同款)
                         radius: win.rCard
-                        color: win.accent
+                        gradient: Gradient {
+                            GradientStop { position: 0; color: win.accent }
+                            GradientStop { position: 1; color: win.grad2 }
+                        }
 
                         ColumnLayout {
                             id: userCol
@@ -852,45 +915,58 @@ ApplicationWindow {
                 roleValue: "step"
                 Item {
                     width: chatList.width
-                    height: stepRow.height + 2
-                    RowLayout {
-                        id: stepRow
+                    height: stepCard.height + 2
+                    // 步骤包一层浅色底卡:工具调用在视觉上成组;失败时整卡染红,比单行文字更醒目
+                    Rectangle {
+                        id: stepCard
                         x: 14
                         width: parent.width - 28
-                        spacing: 8
-                        FluIcon {
-                            text: model.state === "done" ? win.icoCheck
-                                  : (model.state === "fail" ? win.icoError : win.icoClock)
-                            color: model.state === "done" ? win.okColor : (model.state === "fail" ? win.badColor : win.warnColor)
-                            font.pixelSize: 12
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            text: model.state === "fail" && model.brief !== "" ? model.summary + "  —  " + model.brief : model.summary
-                            font.pixelSize: 12
-                            color: model.state === "fail" ? win.badColor : win.subText
-                            wrapMode: Text.Wrap
-                            elide: Text.ElideRight
-                            maximumLineCount: 2
-                        }
-                        // 引用溯源:灰底小标签,标明这一步动的是哪块区域(对齐 Copilot 的「看源」)
-                        Rectangle {
-                            visible: model.ref !== ""
-                            Layout.alignment: Qt.AlignTop
-                            implicitWidth: refLabel.implicitWidth + 12
-                            implicitHeight: refLabel.implicitHeight + 4
-                            radius: 4
-                            color: win.dark ? Qt.rgba(1, 1, 1, 0.06) : Qt.rgba(0, 0, 0, 0.05)
-                            Label {
-                                id: refLabel
-                                anchors.centerIn: parent
-                                text: model.ref
-                                font.pixelSize: 10
-                                color: win.subText
+                        height: stepRow.height + 12
+                        radius: 6
+                        color: model.state === "fail"
+                               ? (win.dark ? Qt.rgba(0.77, 0.17, 0.11, 0.16) : Qt.rgba(0.77, 0.17, 0.11, 0.08))
+                               : (win.dark ? Qt.rgba(1, 1, 1, 0.045) : Qt.rgba(0, 0, 0, 0.03))
+                        Behavior on color { ColorAnimation { duration: 150 } }
+                        RowLayout {
+                            id: stepRow
+                            x: 8
+                            y: 6
+                            width: parent.width - 16
+                            spacing: 8
+                            FluIcon {
+                                text: model.state === "done" ? win.icoCheck
+                                      : (model.state === "fail" ? win.icoError : win.icoClock)
+                                color: model.state === "done" ? win.okColor : (model.state === "fail" ? win.badColor : win.warnColor)
+                                font.pixelSize: 12
                             }
-                            ToolTip.visible: refHover.hovered
-                            ToolTip.text: qsTr("这一步涉及的区域")
-                            HoverHandler { id: refHover }
+                            Label {
+                                Layout.fillWidth: true
+                                text: model.state === "fail" && model.brief !== "" ? model.summary + "  —  " + model.brief : model.summary
+                                font.pixelSize: 12
+                                color: model.state === "fail" ? win.badColor : win.subText
+                                wrapMode: Text.Wrap
+                                elide: Text.ElideRight
+                                maximumLineCount: 2
+                            }
+                            // 引用溯源:灰底小标签,标明这一步动的是哪块区域(对齐 Copilot 的「看源」)
+                            Rectangle {
+                                visible: model.ref !== ""
+                                Layout.alignment: Qt.AlignTop
+                                implicitWidth: refLabel.implicitWidth + 12
+                                implicitHeight: refLabel.implicitHeight + 4
+                                radius: 4
+                                color: win.dark ? Qt.rgba(1, 1, 1, 0.06) : Qt.rgba(0, 0, 0, 0.05)
+                                Label {
+                                    id: refLabel
+                                    anchors.centerIn: parent
+                                    text: model.ref
+                                    font.pixelSize: 10
+                                    color: win.subText
+                                }
+                                ToolTip.visible: refHover.hovered
+                                ToolTip.text: qsTr("这一步涉及的区域")
+                                HoverHandler { id: refHover }
+                            }
                         }
                     }
                 }
@@ -964,11 +1040,20 @@ ApplicationWindow {
             Layout.maximumWidth: 360
             spacing: 10
 
-            FluIcon {
+            // 品牌渐变方块:与侧边栏空状态同款,比裸图标更有产品感
+            Rectangle {
                 Layout.alignment: Qt.AlignHCenter
-                text: win.icoBulb
-                font.pixelSize: 28
-                color: win.warnColor
+                width: 46; height: 46; radius: 12
+                gradient: Gradient {
+                    GradientStop { position: 0; color: win.grad1 }
+                    GradientStop { position: 1; color: win.grad2 }
+                }
+                FluIcon {
+                    anchors.centerIn: parent
+                    text: win.icoBulb
+                    font.pixelSize: 22
+                    color: "#ffffff"
+                }
             }
             Label {
                 Layout.alignment: Qt.AlignHCenter
@@ -1070,20 +1155,45 @@ ApplicationWindow {
                 color: win.subText
             }
             Repeater {
-                // 与输入框上方按钮共用 win.samples:设置里增删,这里自动跟着变
+                // 与输入框上方按钮共用 win.samples:设置里增删,这里自动跟着变。
+                // 从纯文字行升级为胶囊按钮,与 Fluent 的链接按钮观感一致
                 model: win.samples
-                Label {
+                Rectangle {
+                    id: emptyChip
+                    required property var modelData
                     Layout.alignment: Qt.AlignHCenter
-                    Layout.maximumWidth: 340
-                    text: "· " + modelData.text
-                    font.pixelSize: 13
-                    color: win.dark ? "#c3cadb" : "#3d4560"
-                    elide: Text.ElideRight
+                    implicitWidth: chipInner.implicitWidth + 22
+                    implicitHeight: 30
+                    radius: 15
+                    color: chipHover.hovered ? win.accentSoft : win.layerColor
+                    border.width: 1
+                    border.color: chipHover.hovered ? win.accent : win.stroke
+                    Behavior on color { ColorAnimation { duration: 120 } }
+                    // Fluent 触觉确认:按下压缩到 0.97
+                    scale: chipPress.pressed ? 0.97 : 1.0
+                    Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                    Row {
+                        id: chipInner
+                        anchors.centerIn: parent
+                        spacing: 6
+                        FluIcon {
+                            text: emptyChip.modelData.icon
+                            font.pixelSize: 12
+                            color: win.accent
+                        }
+                        Label {
+                            text: emptyChip.modelData.text
+                            font.pixelSize: 12
+                            color: win.textColor
+                        }
+                    }
                     MouseArea {
+                        id: chipPress
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: win.send(modelData.prompt)
+                        onClicked: win.send(emptyChip.modelData.prompt)
                     }
+                    HoverHandler { id: chipHover }
                 }
             }
             Label {
@@ -1127,11 +1237,15 @@ ApplicationWindow {
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: 6
 
-                    Label {
-                        text: qsTr("需要你的确认")
-                        font.pixelSize: 12
-                        font.weight: Font.DemiBold
-                        color: win.warnColor
+                    RowLayout {
+                        spacing: 5
+                        FluIcon { text: win.icoWarn; font.pixelSize: 13; color: win.warnColor }
+                        Label {
+                            text: qsTr("需要你的确认")
+                            font.pixelSize: 12
+                            font.weight: Font.DemiBold
+                            color: win.warnColor
+                        }
                     }
                     Label {
                         text: pendingConfirm.summary || pendingConfirm.tool || ""
@@ -1289,7 +1403,9 @@ ApplicationWindow {
                             FluIcon {
                                 text: sampleBtn.sample.icon
                                 font.pixelSize: 12
-                                color: win.subText
+                                // 悬浮时图标转强调色(Fluent 图标微交互)
+                                color: sampleBtn.hovered ? win.accent : win.subText
+                                Behavior on color { ColorAnimation { duration: 120 } }
                             }
                             Label {
                                 text: sampleBtn.sample.text
@@ -1349,6 +1465,7 @@ ApplicationWindow {
                     // 忙碌点击 = 停止,有文字点击 = 发送 —— 任何状态下点击都有明确反馈。
                     readonly property bool hasText: input.text.trim() !== ""
                     hoverEnabled: true
+                    MouseArea { anchors.fill: parent; acceptedButtons: Qt.NoButton; cursorShape: Qt.PointingHandCursor }
                     contentItem: FluIcon {
                         text: ctrl.busy ? win.icoStop : win.icoSend
                         color: (ctrl.busy || sendBtn.hasText) ? "#ffffff" : win.accent
@@ -1364,7 +1481,7 @@ ApplicationWindow {
                              : sendBtn.hovered ? win.accentHover
                              : win.accent
                         Behavior on color { ColorAnimation { duration: 120 } }
-                        scale: sendBtn.hovered ? 1.06 : 1.0
+                        scale: sendBtn.down ? 0.94 : (sendBtn.hovered ? 1.06 : 1.0)
                         Behavior on scale { NumberAnimation { duration: 120 } }
                     }
                     ToolTip.visible: hovered
@@ -1455,7 +1572,7 @@ ApplicationWindow {
                 }
             }
             Label {
-                visible: selPreviewData.values && selPreviewData.values.length > 6
+                visible: !!selPreviewData.values && selPreviewData.values.length > 6
                 text: qsTr("(仅预览前 6 行,发送后 AI 看到完整选区)")
                 font.pixelSize: 10
                 color: win.subText

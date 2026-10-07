@@ -54,8 +54,9 @@ python main.py
 
 ### 方式三:免 Python 直接运行
 
-`build_exe.bat` 用 [Nuitka](https://nuitka.net) 打包,产物在 `dist\main.dist\ExcelAI.exe`,
-复制整个 `main.dist` 文件夹到任意机器双击即用(首次仍需填 API Key)。
+`build_exe.bat` 用 [Nuitka](https://nuitka.net) 打包,产物是单文件 `dist\ExcelAI.exe`
+(约 34MB,onefile 压缩,Qt/Python 运行时全部内置)。复制到任意机器双击即用(首次仍需填
+API Key);首次启动会解包运行时到 `%LOCALAPPDATA%\SheetTalk\<版本>`(约数秒),之后启动直接复用。
 
 ## Excel 内侧边栏(Office 加载项)
 

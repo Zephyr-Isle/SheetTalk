@@ -55,9 +55,11 @@ python main.py
 
 ### Option 3: portable executable
 
-`build_exe.bat` builds with [Nuitka](https://nuitka.net); the result is
-`dist\main.dist\ExcelAI.exe` — copy the whole `main.dist` folder anywhere and run it,
-no Python required (still needs an API key on first run).
+`build_exe.bat` builds with [Nuitka](https://nuitka.net); the result is a single file
+`dist\ExcelAI.exe` (~34 MB, onefile-compressed, Qt/Python runtime bundled). Copy it
+anywhere and run, no Python required (still needs an API key on first run). The first
+launch unpacks the runtime to `%LOCALAPPDATA%\SheetTalk\<version>` (a few seconds);
+later launches reuse it instantly.
 
 ## Excel sidebar (Office add-in)
 

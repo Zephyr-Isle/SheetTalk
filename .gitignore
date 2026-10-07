@@ -15,3 +15,6 @@ user_quit.flag
 # 日志
 *.log
 dangerous_tools.json
+
+# AI 代理说明:仅本地开发用,不入库
+AGENTS.md
