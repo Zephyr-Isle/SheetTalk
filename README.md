@@ -41,9 +41,11 @@
 
 </div>
 
-<a href="assets/video.mp4"><img src="assets/2.png" width="600" alt="演示视频（点击下载）"></a>
+<div align="center">
+  <video controls width="640" src="assets/video.mp4" alt="表答 SheetTalk 演示视频"></video>
   <br/>
-  <b>点击图片下载演示视频（assets/video.mp4，约 23.9MB；加载稍慢）</b>
+  <b>演示视频（640×360，约 3.7MB，可直接播放）</b>
+</div>
 
 ---
 
@@ -173,7 +175,7 @@ excel-ai-agent/
 │   ├── addin.html        # 侧边栏页面(流式对话 + Markdown 渲染 + 深色主题)
 │   ├── sideload.py/.bat  # 注册脚本:Office 受信任目录 + WPS JS 加载项
 │   └── wps/              # WPS JS 加载项源(ribbon.xml + main.js)
-├── assets/               # 统一图标(icon.ico / icon.png)+ 截图 1/2/3+演示视频(video.mp4)+ 生成器 make_icon.py
+├── assets/               # 统一图标(icon.ico / icon.png)+ 截图 1/2/3+演示视频(video.mp4, 640×360, 3.7MB)+ 生成器 make_icon.py
 ├── selftest.py           # 离线自检(不需要 Excel 和 API Key)
 ├── live_demo_test.py     # 真机冒烟测试(需要打开 Excel)
 ├── install.py            # 一键安装/卸载命令行入口
