@@ -41,11 +41,9 @@
 
 </div>
 
-<div align="center">
-  <video controls width="640" src="assets/video.mp4" alt="表答 SheetTalk 演示视频"></video>
+<a href="assets/video.mp4"><img src="assets/2.png" width="600" alt="演示视频（点击下载）"></a>
   <br/>
-  演示视频
-</div>
+  <b>点击图片下载演示视频（assets/video.mp4，约 23.9MB；加载稍慢）</b>
 
 ---
 
