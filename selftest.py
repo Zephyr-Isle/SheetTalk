@@ -1,9 +1,20 @@
 """离线自检:不依赖 Excel 和真实 LLM,验证 Agent 循环、工具执行与事件流是否正确。
 
 用法: python selftest.py
+
+不依赖本机状态:会话层内部读 config.load(),这里整脚本换成固定的离线配置 ——
+新克隆(或 CI)没有 config.json,而且自检绝不能读到开发者真实的 API Key。
 """
 from app import agent
+from app import config as _config
 from app.tools import Executor
+
+_OFFLINE_SETTINGS = {"provider": "selftest", "base_url": "http://selftest.invalid/v1",
+                     "model": "selftest-model", "api_key": "selftest-key",
+                     "theme_mode": "auto", "samples": None, "max_steps": 30,
+                     "plan_mode": False}
+_real_config_load = _config.load
+_config.load = lambda: dict(_OFFLINE_SETTINGS)
 
 
 class FakeBridge:
@@ -840,6 +851,26 @@ def check_advanced():
     assert "plan" in kk and "cancelled" in kk, kk
     assert [e for e in seen if e["kind"] == "step"][0]["ref"] == "Sheet1!A1:B2"
     print("PASS 事件翻译:plan / cancelled / ref")
+
+    # 6) 没配模型时:会话直接回 need_settings,且不发起任何请求
+    #    (新克隆/CI 上没 config.json,走的就是这条路径 —— 之前自检在这里挂了)
+    _config.load = lambda: {"base_url": "", "model": "", "api_key": ""}
+    try:
+        sess = ChatSession(FakeBridge())
+        kinds, called = [], []
+        real_cc = agent.llm.chat_completions
+        agent.llm.chat_completions = lambda *a, **kw: (called.append(1),
+                                                       {"content": "x", "tool_calls": None})[1]
+        try:
+            returned = sess.send("测试", lambda e: kinds.append(e.get("kind")))
+        finally:
+            agent.llm.chat_completions = real_cc
+        assert returned is True, returned
+        assert kinds == ["need_settings"], kinds
+        assert not called, "未配置模型时不应发起请求"
+    finally:
+        _config.load = lambda: dict(_OFFLINE_SETTINGS)
+    print("PASS 未配置模型:只回 need_settings,不发请求")
 
 
 def check_exemptions():

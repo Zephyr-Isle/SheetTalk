@@ -1,0 +1,40 @@
+# CI:每次 push / PR 跑离线自检(不需 Excel、不需 API Key),回归不过就红。
+# 必须在 Windows 上跑:selftest 会 import pywin32(COM 桥接、进程探测)。
+# 真机端到端(live_demo_test.py)需要 Excel,不在 CI 范围。
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# 只读权限:CI 只跑自检,不需要写任何东西
+permissions:
+  contents: read
+
+# 同一分支连续 push 时取消上一次未跑完的,避免排队
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 = AGENTS.md 声明的最低支持版本;3.14 = 当前开发/验证版本
+        # (PySide6 6.12 的 requires-python 是 >=3.10,<3.16,两档都能装)
+        python-version: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      # 与 requirements.txt 保持一致地装全(selftest 本身不需要 Qt,但环境要和
+      # 用户机器同构);cache: pip 之后重复跑只解压缓存,不再下载上百 MB
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt
+      - name: 离线自检
+        run: python selftest.py
