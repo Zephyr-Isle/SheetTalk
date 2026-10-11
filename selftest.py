@@ -5,9 +5,20 @@
 不依赖本机状态:会话层内部读 config.load(),这里整脚本换成固定的离线配置 ——
 新克隆(或 CI)没有 config.json,而且自检绝不能读到开发者真实的 API Key。
 """
+import sys as _sys
+
 from app import agent
 from app import config as _config
 from app.tools import Executor
+
+# 控制台编码不一定是中文(CI 的英文 Windows 是 cp1252):直接 print 中文会抛
+# UnicodeEncodeError 把自检整个搞挂(CI 上就是这么挂的)。这里只把 errors 放宽,
+# 不改编码 —— 本机中文控制台仍然照常显示中文,只保证任何环境都不会崩。
+for _stream in (_sys.stdout, _sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
 
 _OFFLINE_SETTINGS = {"provider": "selftest", "base_url": "http://selftest.invalid/v1",
                      "model": "selftest-model", "api_key": "selftest-key",

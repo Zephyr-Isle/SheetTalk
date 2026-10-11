@@ -20,6 +20,10 @@ concurrency:
 jobs:
   selftest:
     runs-on: windows-latest
+    # 日志按 UTF-8 写:英文 runner 默认是 cp1252,中文会变成问号(自检本身已对这种
+    # 控制台做了容错,这里是为了日志可读)
+    env:
+      PYTHONIOENCODING: utf-8
     strategy:
       fail-fast: false
       matrix:
