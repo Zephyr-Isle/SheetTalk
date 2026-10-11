@@ -45,7 +45,10 @@ PORT = 8765
 def _main_entry():
     """返回拉起主程序的命令前缀(兼容 PyInstaller / Nuitka 打包态)。"""
     if runtime.is_frozen():
-        return [sys.executable]
+        # 必须用「用户启动的原始 exe」:onefile 下 sys.executable 是解包缓存里的
+        # python.exe(实测该文件根本不存在),照它 Popen 会 FileNotFoundError ——
+        # 跟随启动于是变成静默失效(日志只进 app.log,用户只看到「没反应」)。
+        return [runtime.launch_exe() or sys.executable]
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return [sys.executable, os.path.join(root, "main.py")]
 
@@ -208,16 +211,44 @@ def clear_user_quit():
         pass
 
 
-def _stop_app():
-    """guard 模式:所有表格程序都退出后,主动关掉主程序。"""
+def app_process_name():
+    """主程序进程的镜像名(小写,不含路径),guard 收进程时按它匹配。
+
+    打包态取「用户启动的那个 exe」的名字:onefile 下 sys.executable 是解包缓存
+    里的 python.exe,拿它匹配既永远收不掉主程序、又会误杀用户自己的 python 进程。
+    """
+    return os.path.basename(runtime.launch_exe() or sys.executable or "").lower()
+
+
+def _process_family():
+    """guard 自身进程链的 PID:这些绝不能被当成「要收掉的主程序」。
+
+    Nuitka onefile 下一次启动会同时存在 launcher 与载荷两个同名进程,父进程 ID
+    由 NUITKA_ONEFILE_PARENT(4.2.2 实测会下发)或 os.getppid() 给出。漏掉父进程
+    的话「表格全关」会把 guard 自己的 launcher 一起杀掉,跟随启动从此失灵。
+    """
+    pids = {os.getpid()}
+    for src in (os.getppid(), os.environ.get("NUITKA_ONEFILE_PARENT")):
+        try:
+            pids.add(int(src))
+        except (TypeError, ValueError):
+            pass
+    return pids
+
+
+def _process_names():
+    """生成 (pid, 进程镜像名小写),取不到的进程直接跳过(不抛异常)。
+
+    坑一:pywin32 根本没有 win32process.GetModuleBaseName(报 AttributeError),
+    win32process 上也没有 PROCESS_QUERY_LIMITED_INFORMATION —— 旧实现等于在每个
+    进程上都抛异常被 except 吞掉,「表格全关就收主程序」从未生效过。
+    坑二:GetModuleFileNameEx 的模块序号必须是 0,传 1 会报「句柄无效」。
+    """
     try:
         import win32api
         import win32con
         import win32process
     except Exception:
-        return
-    exe = (os.path.basename(sys.executable) or "").lower()
-    if not exe:
         return
     try:
         pids = win32process.EnumProcesses()
@@ -226,17 +257,49 @@ def _stop_app():
     for pid in pids:
         try:
             h = win32api.OpenProcess(win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-            try:
-                name = win32process.GetModuleBaseName(h, win32process.PROCESS_QUERY_LIMITED_INFORMATION)
-            finally:
-                win32api.CloseHandle(h)
         except Exception:
             continue
-        # 源码运行时主进程是 python.exe,无法据此区分,故只在打包态收进程,
-        # 开发态让用户自己关窗口,避免误杀其他 python 程序。
-        if name and name.lower() == exe and runtime.is_frozen():
+        try:
+            path = win32process.GetModuleFileNameEx(h, 0)
+        except Exception:
+            continue
+        finally:
             try:
-                win32api.TerminateProcess(win32api.OpenProcess(win32con.PROCESS_TERMINATE, False, pid), 1)
-                log.info("表格程序已全部退出,已关闭主程序")
+                win32api.CloseHandle(h)
             except Exception:
                 pass
+        name = os.path.basename(path or "").lower()
+        if name:
+            yield pid, name
+
+
+def _stop_app():
+    """guard 模式:所有表格程序都退出后,主动关掉主程序。"""
+    # 源码运行时主进程也是 python.exe,无法据此区分,故只在打包态收进程,
+    # 开发态让用户自己关窗口,避免误杀其他 python 程序。
+    if not runtime.is_frozen():
+        return
+    try:
+        import win32api
+        import win32con
+    except Exception:
+        return
+    want = app_process_name()
+    if not want:
+        return
+    mine = _process_family()
+    killed = 0
+    for pid, name in _process_names():
+        if pid in mine or name != want:
+            continue
+        try:
+            h = win32api.OpenProcess(win32con.PROCESS_TERMINATE, False, pid)
+            try:
+                win32api.TerminateProcess(h, 1)
+            finally:
+                win32api.CloseHandle(h)
+            killed += 1
+        except Exception:
+            pass
+    if killed:
+        log.info("表格程序已全部退出,已关闭主程序(%d 个进程)", killed)

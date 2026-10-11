@@ -93,6 +93,9 @@
          transition:border-color .15s, color .15s, background .15s, transform .1s, box-shadow .15s; }
   .btn:hover { border-color:var(--g1); color:var(--g1); box-shadow:var(--shadow-m); }
   .btn:active { transform:scale(.97); box-shadow:none; }
+  /* 无豁免时「撤销全部豁免」置灰,避免点了没反应 */
+  .btn:disabled { opacity:.5; cursor:default; }
+  .btn:disabled:hover { border-color:var(--outline); color:var(--text); box-shadow:none; }
   /* 主按钮悬浮保持白字(否则会出现绿底绿字),用亮度反馈代替变色 */
   .btn.primary:hover { color:#fff; filter:brightness(1.08); }
   .btn.primary { background:linear-gradient(135deg,var(--g1),var(--g2)); color:#fff; border:none; }
@@ -135,6 +138,26 @@
   .cb-remember { display:flex; gap:5px; align-items:center; font-size:11px;
                  color:var(--muted); margin:-2px 0 0; cursor:pointer; }
   .cb-remember input { accent-color:var(--g1); margin:0; }
+  /* 会话豁免清单(设置区):列出被「本会话始终允许」放行的危险操作 */
+  .cb-list { border:1px solid var(--outline); border-radius:8px; background:var(--surface-dim);
+             max-height:132px; overflow-y:auto; }
+  .cb-item { display:flex; align-items:baseline; gap:6px; padding:6px 9px; font-size:12px;
+             border-bottom:1px solid var(--outline); }
+  .cb-item:last-child { border-bottom:none; }
+  .cb-item .ico { color:var(--warn); font-size:11px; }
+  .cb-item .cb-arg { color:var(--muted); font-size:11px; flex:1 1 auto; min-width:0;
+                     text-align:right; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* 剩余时间:等宽数字,避免倒计时时整行宽度跳动 */
+  .cb-item .cb-left { flex:0 0 auto; color:var(--muted); font-size:11px; margin-left:8px;
+                      font-variant-numeric:tabular-nums; }
+  /* 单条撤销:行尾小图标按钮(平常极淡,悬浮才显红,不抢列表注意力) */
+  .cb-item .cb-x { flex:0 0 auto; border:none; background:transparent; color:var(--muted);
+                   font-family:var(--icon-font); font-size:10px; line-height:1;
+                   padding:3px 4px; margin-left:2px; border-radius:4px; cursor:pointer;
+                   opacity:.55; transition:opacity .15s, color .15s, background .15s; }
+  .cb-item:hover .cb-x { opacity:1; }
+  .cb-item .cb-x:hover { color:var(--bad); background:rgba(196,43,28,.10); }
+  .cb-empty { color:var(--muted); font-size:11px; padding:8px 9px; line-height:1.5; }
 
   /* 加载动画:等待首个内容时的三点打字动画 */
   .typing { display:flex; gap:4px; padding:3px 0; }
@@ -346,7 +369,7 @@
   </div>
   <label class="cb-remember" id="cb-remember-row" hidden>
     <input type="checkbox" id="cb-remember">
-    <span>我了解风险:本会话内该工具不再弹确认;不勾选按仅本次处理</span>
+    <span id="cb-remember-text">我了解风险:本会话内该工具不再弹确认;不勾选按仅本次处理</span>
   </label>
 </div>
 
@@ -373,6 +396,11 @@
     </select><div class="field-hint">桌面窗口与侧边栏同步生效。</div></div>
     <div class="field"><label>示例快捷指令(每行一条;留空恢复内置默认)</label><textarea id="f-samples" rows="3" class="area"></textarea></div>
     <div class="field"><label>单次任务最大工具步数(5–500)</label><input id="f-steps" type="number" min="5" max="500" step="1" value="30"><div class="field-hint" id="f-steps-hint">简单任务 20–30 足够;批量改写、跨表分析建议 60–150。</div></div>
+    <div class="field"><label>本会话豁免的危险操作</label>
+      <div class="cb-list" id="f-allowed"></div>
+      <div class="field-hint" id="allowed-hint">确认危险操作时选「本会话始终允许」的会列在这里,一段时间后自动失效;撤销后恢复逐次确认。</div>
+      <div class="btnrow"><button class="btn" id="btn-allowed-clear">撤销全部豁免</button></div>
+    </div>
     <div class="test-result" id="test-result"></div>
     <div class="btnrow">
       <button class="btn" id="btn-test">测试连接</button>
@@ -464,7 +492,7 @@
     if (card && card.typing) card.typing.style.display = on ? "flex" : "none";
   }
   // 图标字符(Windows 自带 Segoe Fluent Icons,替代 Emoji,避免跨平台渲染差异)
-  var ICON = { clock: "\ue823", check: "\ue73e", error: "\uea39", warn: "\ue7ba", send: "\ue72a", stop: "\ue71a", list: "\ue8fd" };
+  var ICON = { clock: "\ue823", check: "\ue73e", error: "\uea39", warn: "\ue7ba", send: "\ue72a", stop: "\ue71a", list: "\ue8fd", close: "\ue711" };
   function iconHTML(cp) { return '<span class="ico">' + cp + "</span>"; }
 
   // 发送键状态:永不 disabled(对齐桌面端「任何状态点击都有反馈」)。
@@ -717,10 +745,139 @@
       $("#f-samples").value = Array.isArray(d.settings.samples)
         ? d.settings.samples.map(chipPrompt).join("\n") : "";
       syncSteps();
+      loadAllowed();
       var tr = $("#test-result"); tr.className = "test-result"; tr.textContent = "";
       $("#mask").classList.add("show");
     }).catch(function () { toast("读取设置失败"); });
   }
+
+  /* 会话豁免:查看 + 一键撤销(与桌面端共用 agent 的同一份状态)。
+     条目一律用 textContent 写入 —— arg 是模型给的参数值,绝不能拼进 innerHTML。
+     豁免带时效:每行显示剩余时间,本地每秒倒计时;归零后重拉,过期项随之消失。 */
+  var allowedTtl = 0;        // 豁免总时长(秒),服务端下发,N 只在服务端定义一份
+  var allowedLeft = [];      // 每行剩余秒数
+  var allowedSpans = [];     // 每行的倒计时节点:每秒只改文本,不重建 DOM
+
+  function ttlMinutes() {
+    return allowedTtl > 0 ? Math.max(1, Math.round(allowedTtl / 60)) : 0;
+  }
+
+  /* 把「N 分钟后自动失效」写进设置区提示与确认条勾选项(N 来自服务端) */
+  function applyTtlLabels() {
+    var m = ttlMinutes();
+    var hint = $("#allowed-hint");
+    if (hint) {
+      hint.textContent = m
+        ? "确认危险操作时选「本会话始终允许」的会列在这里," + m + " 分钟后自动失效;撤销后恢复逐次确认。"
+        : "确认危险操作时选「本会话始终允许」的会列在这里;撤销后恢复逐次确认。";
+    }
+    var rt = $("#cb-remember-text");
+    if (rt) {
+      rt.textContent = m
+        ? "我了解风险:本会话内该工具不再弹确认(" + m + " 分钟后自动失效);不勾选按仅本次处理"
+        : "我了解风险:本会话内该工具不再弹确认;不勾选按仅本次处理";
+    }
+  }
+
+  function fmtLeft(sec) {
+    var s = Math.max(0, Math.round(sec));
+    return "剩 " + Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2);
+  }
+
+  function renderAllowed(d) {
+    var box = $("#f-allowed");
+    if (!box) { return; }
+    var clearBtn = $("#btn-allowed-clear");
+    box.innerHTML = "";
+    allowedLeft = [];
+    allowedSpans = [];
+    if (d && d.ttl) { allowedTtl = Number(d.ttl) || 0; }
+    applyTtlLabels();
+    var items = (d && d.items) || [];
+    if (!items.length) {
+      var empty = document.createElement("div");
+      empty.className = "cb-empty";
+      empty.textContent = "当前没有豁免,危险操作每次都会向你确认。";
+      box.appendChild(empty);
+      if (clearBtn) { clearBtn.disabled = true; }
+      return;
+    }
+    items.forEach(function (it) {
+      var row = document.createElement("div");
+      row.className = "cb-item";
+      var ic = document.createElement("span");
+      ic.className = "ico";
+      ic.innerHTML = "&#xE7BA;";            // 固定图标码位,不含外部文本
+      var name = document.createElement("span");
+      name.textContent = it.label || it.tool || "";
+      row.appendChild(ic);
+      row.appendChild(name);
+      if (it.arg) {
+        var arg = document.createElement("span");
+        arg.className = "cb-arg";
+        arg.textContent = it.arg;
+        arg.title = it.arg;
+        row.appendChild(arg);
+      }
+      var left = document.createElement("span");
+      left.className = "cb-left";
+      left.textContent = fmtLeft(it.expires_in || 0);
+      left.title = "豁免到期后,同类操作会重新向你确认";
+      allowedLeft.push(Number(it.expires_in) || 0);
+      allowedSpans.push(left);
+      row.appendChild(left);
+      // 单条撤销:键作为闭包变量传给 revokeOne,不拼进任何 HTML
+      var x = document.createElement("button");
+      x.type = "button";
+      x.className = "cb-x";
+      x.textContent = ICON.close;               // 固定码位,不含外部文本
+      x.title = "撤销这条豁免";
+      x.setAttribute("aria-label", "撤销这条豁免");
+      x.onclick = function () { revokeOne(it.key); };
+      row.appendChild(x);
+      box.appendChild(row);
+    });
+    if (clearBtn) { clearBtn.disabled = false; }
+  }
+
+  function loadAllowed() {
+    fetch("/api/session_allowed").then(function (r) { return r.json(); })
+      .then(renderAllowed).catch(function () { });
+  }
+
+  /* 单条撤销:键可能在点击前就到期了(服务端已回收),这时按「已失效」提示并刷新。
+     接口连带把撤销后的清单回给我们,直接重渲,省一次往返。 */
+  function revokeOne(key) {
+    fetch("/api/session_allowed/revoke", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: key }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.items) { renderAllowed(d); } else { loadAllowed(); }
+        toast(d && d.ok ? "已撤销该豁免" : "该豁免已失效,已刷新列表");
+      })
+      .catch(function () { toast("撤销失败,请重试"); });
+  }
+
+  // 本地倒计时:每秒减 1;有行归零就重拉一次(服务端已回收过期项,列表随之变短)
+  setInterval(function () {
+    if (!allowedSpans.length) { return; }
+    var expired = false;
+    for (var i = 0; i < allowedSpans.length; ++i) {
+      allowedLeft[i] = Math.max(0, allowedLeft[i] - 1);
+      allowedSpans[i].textContent = fmtLeft(allowedLeft[i]);
+      if (allowedLeft[i] === 0) { expired = true; }
+    }
+    if (expired && $("#mask").classList.contains("show")) { loadAllowed(); }
+  }, 1000);
+
+  $("#btn-allowed-clear").onclick = function () {
+    fetch("/api/session_allowed/clear", { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then(function (r) { return r.json(); })
+      .then(function () { loadAllowed(); toast("已撤销全部会话豁免"); })
+      .catch(function () { toast("撤销失败,请重试"); });
+  };
 
   /* 步数输入实时回显最终生效值(与 agent.py 的 max(5, min(v, 500)) 钳制口径一致) */
   var stepsInput = $("#f-steps");
@@ -863,6 +1020,11 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sid: sid, allowed: choice !== "deny",
                              remember: remember }) });
+    if (remember) {
+      var m = ttlMinutes();
+      toast(m ? "已加入会话豁免(" + m + " 分钟后自动失效),可在设置里撤销"
+              : "已加入会话豁免,可在设置里撤销");
+    }
   };
 
   // chip 的文案已不含图标(图标是独立的 .ico 元素),所以用纯文案做 key
@@ -910,6 +1072,7 @@
 
   pollStatus();
   loadSamples();
+  loadAllowed();                          // 取豁免清单与时效(也用于确认条/提示的 N 分钟文案)
   setInterval(pollStatus, 2000);
 
   // SSE 推送:确认请求毫秒级到达(轮询 /api/pending_confirm 保留为兜底)

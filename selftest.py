@@ -63,6 +63,8 @@ def main():
     check_hardening()
     check_rag()
     check_safety()
+    check_exemptions()
+    check_regressions()
     print("SELFTEST OK")
 
 
@@ -322,7 +324,7 @@ def check_safety():
     steps2 = [e for e in ev2 if e["type"] == "step_result"]
     assert steps2 and "未确认" not in steps2[-1]["brief"], steps2
     agent_mod._SESSION_ALLOWED_TOOLS.clear()   # 清理,免得影响其它用例
-    agent_mod._SESSION_ALLOWED_TOOLS.discard("clear_range")
+    agent_mod._SESSION_ALLOWED_TOOLS.pop("clear_range", None)
 
     # 3c) remember 只豁免同一工具:换一个危险工具必须仍弹确认
     agent_mod.llm.chat_completions = make_llm(False, "clear_range", {"cell_range": "A1:B2"})
@@ -400,6 +402,356 @@ def check_safety():
         srv.shutdown()
         agent_mod._CONFIRM_WAIT.pop(rsid, None)
     print("PASS 安全:校验 / 白名单 / 二次确认(四象限+会话记住) / web_server 恢复")
+
+
+def check_regressions():
+    """回归自检:锁住已修好的真实缺陷(每个都先断言「缺陷行为不存在」)。
+
+    ① 切实例后重拍快照必须生效 ② 二次确认必须销号 ③ guard 不误杀自己
+    ④ 数组参数写扁必须归一 ⑤ execute 对非 dict 参数永不抛异常
+    """
+    import json as _json
+    import os
+    import sys as _sys
+    import threading
+    import time as _t
+
+    from app import agent as agent_mod
+    from app import runtime
+    import app.watcher as watcher
+    from app.excel_bridge import ExcelBridge
+
+    # ① 多开 Excel 切换实例后的重拍快照必须真正生效(而不是拿到快照又报「无工作簿」)
+    class _FakeWorker:
+        def submit(self, fn, timeout=0):
+            return fn()
+
+    br = ExcelBridge.__new__(ExcelBridge)
+    br.worker = _FakeWorker()
+    br.app = object()
+    br.host_kind, br.host_label, br._pinned = "excel", "Microsoft Excel", None
+    br._alive = lambda: True
+    br._switch_to_workbook = lambda: True
+    calls = {"n": 0}
+
+    def _snap():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Excel 忙(非 BridgeError)")   # 走通用 except 分支
+        return {"workbook": "测试.xlsx", "path": "C:/测试.xlsx", "sheets": [],
+                "active_sheet": "Sheet1", "selection": None,
+                "open_workbooks": [], "app_visible": True}
+
+    br._snapshot = _snap
+    st = br.status()
+    assert calls["n"] == 2, f"未走「切换实例后重拍」路径:{calls}"
+    assert st.get("workbook") == "测试.xlsx", f"重拍成功的快照被丢弃:{st}"
+
+    # ② 二次确认无论以何种方式结束都要销号,否则失效的确认条会反复弹回侧边栏
+    agent_mod._CONFIRM_WAIT.clear()
+    calls2 = {"n": 0}
+
+    def _del_llm(*a, **kw):
+        calls2["n"] += 1
+        if calls2["n"] == 1:
+            return {"content": "", "tool_calls": [{"id": "r1", "type": "function",
+                    "function": {"name": "delete_sheet",
+                                 "arguments": _json.dumps({"name": "表1"})}}]}
+        return {"content": "已处理", "tool_calls": None}
+
+    real_llm = agent_mod.llm.chat_completions
+    agent_mod.llm.chat_completions = _del_llm
+    cancel = threading.Event()
+    ev, done = [], threading.Event()
+
+    def _run():
+        try:
+            agent_mod.run_agent(FakeBridge(), {"base_url": "http://x", "api_key": "k",
+                                               "model": "m"}, [], "删掉表1",
+                                Executor(None), ev.append, cancel=cancel)
+        finally:
+            done.set()
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    sid = None
+    for _ in range(50):
+        sid = next((e["sid"] for e in ev if e["type"] == "confirm"), None)
+        if sid:
+            break
+        _t.sleep(0.1)
+    assert sid, "未发出 confirm 事件"
+    cancel.set()                 # 用户点「停止」→ 确认等待被中止
+    assert done.wait(10), "中止后 agent 未收尾"
+    agent_mod.llm.chat_completions = real_llm
+    assert sid not in agent_mod._CONFIRM_WAIT, f"确认等待未销号:{list(agent_mod._CONFIRM_WAIT)}"
+    assert agent_mod.pending_confirms() == [], agent_mod.pending_confirms()
+    agent_mod._CONFIRM_WAIT.clear()
+
+    # ③ guard 收进程:必须真能枚举出进程名(旧实现调的是 pywin32 里根本不存在的     #     win32process.GetModuleBaseName,于是每个进程都抛异常被 except 吞掉,
+
+    #     「表格全关就收主程序」从未生效),名字要取自「用户启动的 exe」,
+    #    且不能误杀 guard 自己 / 自己的 launcher 父进程 / 用户的 python.exe
+    killed = []
+    guard_pid = os.getpid()
+    parent_pid = 777001          # 模拟 onefile 的 launcher 父进程
+    want = "sheettalk.exe"      # app_process_name() 取自 launch_exe(),不是 sys.executable
+    names = {guard_pid: want, parent_pid: want, 4242: want, 9999: want,
+             5555: "python.exe", 6666: "excel.exe"}
+
+    class _Api:
+        def OpenProcess(self, access, inherit, pid):
+            return pid
+
+        def CloseHandle(self, h):
+            pass
+
+        def TerminateProcess(self, h, code):
+            killed.append(h)
+
+    class _Proc:
+        def EnumProcesses(self):
+            return [guard_pid, parent_pid, 4242, 4243, 9999, 5555, 6666]
+
+        def GetModuleFileNameEx(self, h, mod):
+            # 实测:模块序号传 1 会报「句柄无效」,必须是 0
+            assert mod == 0, "GetModuleFileNameEx 的模块序号必须是 0"
+            if h == 4243:
+                raise RuntimeError("模拟受保护进程:取不到主模块")
+            return "C:\\app\\" + names.get(h, "unknown.exe")
+
+    class _Con:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        PROCESS_TERMINATE = 0x0001
+
+    saved = {k: _sys.modules.get(k) for k in ("win32api", "win32process", "win32con")}
+    real_frozen = runtime.is_frozen
+    real_launch = runtime.launch_exe
+    real_parent_env = os.environ.get("NUITKA_ONEFILE_PARENT")
+    os.environ["NUITKA_ONEFILE_PARENT"] = str(parent_pid)
+    runtime.launch_exe = lambda: r"C:\app\SheetTalk.exe"
+    _sys.modules.update({"win32api": _Api(), "win32process": _Proc(), "win32con": _Con()})
+    try:
+        # 开发态(未冻结):与主进程同为 python.exe,绝不能动手
+        watcher._stop_app()
+        assert killed == [], f"开发态不应收任何进程:{killed}"
+        runtime.is_frozen = lambda: True
+        watcher._stop_app()
+    finally:
+        runtime.is_frozen, runtime.launch_exe = real_frozen, real_launch
+        if real_parent_env is None:
+            os.environ.pop("NUITKA_ONEFILE_PARENT", None)
+        else:
+            os.environ["NUITKA_ONEFILE_PARENT"] = real_parent_env
+        for k, v in saved.items():
+            if v is None:
+                _sys.modules.pop(k, None)
+            else:
+                _sys.modules[k] = v
+    # 只收「用户启动的 exe」同名的其它进程:自己、launcher 父进程、
+    # 以及 python.exe / excel.exe 都不能被碰(旧实现会拿 sys.executable 的
+    # python.exe 去匹配,把用户自己的 python 进程也杀掉)
+    assert killed == [4242, 9999], f"收进程集合不对(只应含同名的其它进程):{killed}"
+
+    # ③b 真实 API 探一下:pywin32 到底能不能枚举出进程名(旧实现用的
+    #     GetModuleBaseName 不存在,模拟桩再完美也跑不出真实效果)
+    real_names = dict(watcher._process_names())
+    assert real_names, "真实进程枚举一个都没拿到(win32 API 用错了)"
+    assert os.path.basename(_sys.executable).lower() in set(real_names.values()), \
+        "枚举结果里连本进程都没有:%s" % sorted(set(real_names.values()))[:5]
+
+    # ④ 数组参数写成裸字符串时必须归一(旧行为:逐字符展开,
+    #    print_sheets("Sheet1") → ['S','h','e','e','t','1'])
+    from app.tools import validate_args as _va
+
+    sch_arr = {"properties": {"sheets": {"type": "array"}}}
+    assert _va(sch_arr, {"sheets": "Sheet1"})[0] == {"sheets": ["Sheet1"]}
+    assert _va(sch_arr, {"sheets": "Sheet1,Sheet2"})[0] == {"sheets": ["Sheet1", "Sheet2"]}
+    assert _va(sch_arr, {"sheets": "A1，B2"})[0] == {"sheets": ["A1", "B2"]}
+    assert _va(sch_arr, {"sheets": ["S1"]})[0] == {"sheets": ["S1"]}
+    assert _va(sch_arr, {"sheets": ""})[0] == {"sheets": None}   # 空串=未提供,保留默认
+    assert _va(sch_arr, {})[0] == {}                              # 未给就未给
+
+    class _FakeBridge:
+        def read_range(self, sheet, cell_range, max_cells=500):
+            return {"range": cell_range, "values": [[1]]}
+
+        def print_sheets(self, sheets=None, copies=1):
+            return {"printed": [str(x) for x in (sheets or [])]}
+
+    _ex = Executor(_FakeBridge())
+    assert _ex.execute("print_sheets", {"sheets": "Sheet1"})["printed"] == ["Sheet1"]
+
+    # ④b 系统提示词与注册表不能脱节:提示词里形如工具名的标识符必须真实存在,
+    #     占位符必须齐全且能被替换干净 —— 改工具名/加规则时最容易忘的一环
+    import re as _re
+
+    from app.agent import PLAN_PROMPT, SYSTEM_TEMPLATE, build_messages
+    from app.tools import META_TOOLS as _META
+    from app.tools import TOOLS as _TOOLS
+
+    _pname = {t["function"]["name"] for t in _TOOLS} | {t["function"]["name"] for t in _META}
+    _argnames = set()      # 参数名 + 枚举值:两者都是提示词里合法会出现的词
+    for _t in _TOOLS + _META:
+        for _k, _v in (((_t["function"].get("parameters") or {}).get("properties") or {})).items():
+            _argnames.add(_k)
+            _argnames |= {str(_e) for _e in (_v.get("enum") or [])}
+    for _tpl_name, _tpl in (("SYSTEM_TEMPLATE", SYSTEM_TEMPLATE), ("PLAN_PROMPT", PLAN_PROMPT)):
+        _flat = _re.sub(r"\{[a-z_]+\}", " ", _tpl)   # 先剔除 {context}/{user_text} 这类占位符
+        _toks = set(_re.findall(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b", _flat))
+        _stray = sorted(_toks - _pname - _argnames)
+        assert not _stray, f"{_tpl_name} 引用了不存在的工具名/参数名:{_stray}"
+    assert "{context}" in SYSTEM_TEMPLATE and "{selection}" in SYSTEM_TEMPLATE
+    assert "{user_text}" in PLAN_PROMPT
+    _sysmsg = build_messages(FakeBridge(), [], "看看表")[0]["content"]
+    assert "{context}" not in _sysmsg and "{selection}" not in _sysmsg
+    assert PLAN_PROMPT.replace("{user_text}", "X").count("{user_text}") == 0
+    # 工具调用的关键约束必须在提示词里(靠它保持模型不乱传参)
+    for _kw in ("cell_range", "JSON 数组", "read_range", "call_tool", "search_tools"):
+        assert _kw in SYSTEM_TEMPLATE, f"系统提示词缺少关键约束:{_kw}"
+
+    # ④c 事件协议三端一致(AGENTS.md:新增事件类型要改四处 —— agent 产出 → chat 翻译 →
+    #     Main.qml / addin.html 处理)。QML 的 done 是已知豁免:收尾指示器由 ctrl.busy
+    #     驱动,不需要该分支;漏一处就是「某个状态永远不该消失/永远转圈」。
+    _root = os.path.dirname(os.path.abspath(__file__))
+
+    def _read(rel):
+        with open(os.path.join(_root, *rel.split("/")), encoding="utf-8") as _f:
+            return _f.read()
+
+    _agent_src, _chat_src = _read("app/agent.py"), _read("app/chat.py")
+    _qml_src, _html_src = _read("qml/Main.qml"), _read("addin/addin.html")
+    _a_types = set(_re.findall(r'emit\(\s*\{[^{}]*?"type":\s*"([a-z_]+)"', _agent_src, _re.S))
+    _c_types = set(_re.findall(r'\bt\s*==\s*"([a-z_]+)"', _chat_src))
+    assert _a_types and _a_types == _c_types, f"agent/chat 事件不匹配:{sorted(_a_types ^ _c_types)}"
+    _c_kinds = set(_re.findall(r'"kind":\s*"([a-z_]+)"', _chat_src))
+    _q_switch = _re.search(r"function onChatEvent\(ev\)([\s\S]*?)function on", _qml_src)
+    assert _q_switch, "Main.qml 里找不到 onChatEvent"
+    _q_kinds = set(_re.findall(r'case\s+"([a-z_]+)"', _q_switch.group(1)))
+    _h_kinds = set(_re.findall(r'case\s+"([a-z_]+)"', _html_src))
+    assert not (_c_kinds - _q_kinds - {"done"}), f"QML 未处理的事件:{sorted(_c_kinds - _q_kinds - {'done'})}"
+    assert not (_c_kinds - _h_kinds), f"加载项未处理的事件:{sorted(_c_kinds - _h_kinds)}"
+
+    # ⑤ execute 承诺「永远返回 dict」:参数不是对象也不能抛(旧行为:整轮对话
+    #    以「内部错误:dictionary update sequence...」收尾)
+    for bad in ("A1:B2", 5, ["A1:B2"], object()):
+        r = _ex.execute("read_range", bad)
+        assert isinstance(r, dict) and "error" in r, (bad, r)
+    # 参数被写成 JSON 字符串(模型常见)时应直接解析成功
+    r2 = _ex.execute("read_range", '{"cell_range": "A1:B2"}')
+    assert r2.get("range") == "A1:B2", r2
+
+    # ⑥ 开机自启命令:第一个引号片段必须正好是 exe 路径
+    #    (整条命令包一对引号 → Windows 把它当成一个不存在的文件名,开机静默失败)
+    import importlib.util
+    from importlib.util import spec_from_file_location
+
+    sl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "addin", "sideload.py")
+    spec = spec_from_file_location("excelai_sideload_regression", sl_path)
+    sl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sl)
+    parts = [r"C:\Program Files\Py\pythonw.exe", r"D:\proj\main.py", "--watch-guard"]
+    cmd = sl._watch_run_command(parts)
+    assert cmd.split('"')[1] == parts[0], f"exe 未被单独引起来:{cmd}"
+    assert cmd.split('"')[0] == "" and cmd.count('"') == 2, f"引号位置不对:{cmd}"
+    # 开发态无空格路径:干脆不需要任何引号
+    assert '"' not in sl._watch_run_command([r"C:\py\pythonw.exe", r"D:\p\main.py"])
+
+    # ⑦ 冻结态一律用「用户启动的原始 exe」:onefile 下 sys.executable 指向解包缓存
+    #    里并不存在的 python.exe(Nuitka 4.2.2 实测),照它登记开机自启、写桌面
+    #    快捷方式、Popen 拉起主程序全都静默失效
+    import app.installer as installer
+
+    real_frozen2, real_argv = runtime.is_frozen, _sys.argv
+    real_bin = os.environ.pop("NUITKA_ONEFILE_BINARY", None)
+    orig = r"D:\Program Files\SheetTalk\ExcelAI.exe"
+    try:
+        runtime.is_frozen = lambda: True
+        _sys.argv = [orig, "--smoke"]
+        assert runtime.launch_exe() == os.path.abspath(orig), runtime.launch_exe()
+        assert watcher._main_entry() == [os.path.abspath(orig)], watcher._main_entry()
+        assert watcher.app_process_name() == "excelai.exe", watcher.app_process_name()
+        assert sl._launch_exe() == os.path.abspath(orig), sl._launch_exe()
+        assert installer._shortcut_target()[0] == os.path.abspath(orig)
+        assert installer._icon_ico_path() == os.path.abspath(orig)
+        real_sl_frozen = sl._is_frozen
+        sl._is_frozen = lambda: True
+        try:
+            wcmd_parts = sl._watch_command()
+            assert wcmd_parts == [os.path.abspath(orig), "--watch-guard"], wcmd_parts
+            # 自启项:exe 单独引号、后面跟 --watch-guard、不含缓存里的 python.exe
+            wcmd = sl._watch_run_command()
+            assert wcmd.split('"')[1] == os.path.abspath(orig), wcmd
+            assert wcmd.endswith(" --watch-guard"), wcmd
+            assert "python" not in wcmd.lower(), wcmd
+        finally:
+            sl._is_frozen = real_sl_frozen
+        # 只有拿不到 exe 形态的 argv[0] 时才退回 sys.executable
+        _sys.argv = ["some.py"]
+        assert runtime.launch_exe() == os.path.abspath(_sys.executable)
+    finally:
+        runtime.is_frozen, _sys.argv = real_frozen2, real_argv
+        if real_bin is not None:
+            os.environ["NUITKA_ONEFILE_BINARY"] = real_bin
+    if not real_frozen2():
+        assert runtime.launch_exe() is None, "开发态不该掺和 exe 路径"
+
+    # ⑧ 工具参数必须「不用猜」:每个参数都要有中文说明(同名同义的在 tools._PARAM_DOCS
+    #     里集中维护),且说明里列出的取值清单不能与 bridge 的常量表脱节 ——
+    #     chart_type / icon_set 这类参数在 schema 里没有 enum,说明就是唯一依据
+    from app.excel_bridge import CHART_TYPES as _CT
+    from app.excel_bridge import ExcelBridge as _EB
+    from app.tools import META_TOOLS as _MT
+    from app.tools import TOOLS as _T
+
+    _undoc = ["%s.%s" % (t["function"]["name"], k)
+              for t in _T + _MT
+              for k, v in (((t["function"].get("parameters") or {}).get("properties") or {})).items()
+              if not (v or {}).get("description")]
+    assert not _undoc, "这些参数没有说明,模型只能猜:%s" % _undoc[:8]
+
+    def _param(tool, key):
+        for _t in _T:
+            if _t["function"]["name"] == tool:
+                return _t["function"]["parameters"]["properties"][key]
+        raise AssertionError("找不到工具:%s" % tool)
+
+    for _k in _CT:
+        assert _k in _param("create_chart", "chart_type")["description"], \
+            "chart_type 的说明漏了取值 %s" % _k
+    for _k in _EB._CF_ICON_SETS:
+        assert _k in _param("set_conditional_format", "icon_set")["description"], \
+            "icon_set 的说明漏了取值 %s" % _k
+
+    # ⑧b 说明必须真的随请求下发(而不是只躺在模块里没进 payload)
+    _seen = {}
+    _real_cc = agent_mod.llm.chat_completions
+
+    def _capture(*a, **kw):
+        if kw.get("tools"):
+            _seen["tools"] = kw["tools"]
+        return {"content": "收到", "tool_calls": None}
+
+    agent_mod.llm.chat_completions = _capture
+    try:
+        agent_mod.run_agent(FakeBridge(), {"base_url": "http://x", "api_key": "k", "model": "m"},
+                            [], "把 C 列宽度调到 20", Executor(None), lambda e: None)
+    finally:
+        agent_mod.llm.chat_completions = _real_cc
+    assert _seen.get("tools"), "请求的 tools 为空"
+    # 下发的 schema(真实 payload)里不允许有「没说明的参数」
+    _nodoc = ["%s.%s" % (t["function"]["name"], k)
+              for t in _seen["tools"]
+              for k, v in (((t["function"].get("parameters") or {}).get("properties") or {})).items()
+              if not (v or {}).get("description")]
+    assert not _nodoc, "下发的 schema 里还有没说明的参数:%s" % _nodoc
+    _docstrings = [v["description"] for t in _seen["tools"]
+                   for v in (((t["function"].get("parameters") or {}).get("properties") or {})).values()
+                   if isinstance(v, dict) and v.get("description")]
+    assert len(_docstrings) >= 5, "payload 里的参数说明太少:%s" % _docstrings
+    print("PASS 回归:实例切换重拍快照 / 确认销号 / guard 收进程不误杀 /"
+          " 数组归一 / 非对象参数不抛异常 / 自启命令引号 / 提示词与三端事件协议一致 /"
+          " 冻结态指向原始 exe / 工具参数全有说明且取值清单与 bridge 一致")
 
 
 def check_advanced():
@@ -488,6 +840,106 @@ def check_advanced():
     assert "plan" in kk and "cancelled" in kk, kk
     assert [e for e in seen if e["kind"] == "step"][0]["ref"] == "Sheet1!A1:B2"
     print("PASS 事件翻译:plan / cancelled / ref")
+
+
+def check_exemptions():
+    """会话豁免的三端契约:agent 存「作用域键+时效」 → 两端渲染可读条目并可撤销。"""
+    import os
+
+    from app import agent as agent_mod
+    from app.tools import DANGEROUS_TOOLS, STEP_NAMES
+
+    saved = dict(agent_mod._SESSION_ALLOWED_TOOLS)
+    try:
+        agent_mod.clear_session_allowed()
+        assert agent_mod.session_allowed_tools() == [], agent_mod.session_allowed_tools()
+        assert agent_mod.session_allowed_items() == [], "空清单应返回空数组"
+
+        # ① 作用域键 → 条目:工具名 / 中文名 / 主参数值 / 剩余秒数(两端直接渲染这四个字段)
+        agent_mod._grant_exemption("delete_sheet:Sheet2")
+        agent_mod._grant_exemption("clear_range")
+        items = agent_mod.session_allowed_items()
+        assert [i["key"] for i in items] == ["clear_range", "delete_sheet:Sheet2"], items
+        by_key = {i["key"]: i for i in items}
+        assert by_key["clear_range"]["arg"] == "" and by_key["clear_range"]["label"] == "清空区域"
+        assert by_key["delete_sheet:Sheet2"] == {"key": "delete_sheet:Sheet2",
+                                                "tool": "delete_sheet", "label": "删除工作表",
+                                                "arg": "Sheet2",
+                                                "expires_in": by_key["delete_sheet:Sheet2"]["expires_in"]}
+        # 剩余秒数必须在 (0, 总时长] 内:两端据此本地倒计时,发负数或超长都是错的
+        assert 0 < by_key["clear_range"]["expires_in"] <= agent_mod.SESSION_ALLOWED_TTL
+
+        # ② 每个危险工具都要有中文名:漏了用户就会在界面上看到英文裸名
+        _noname = sorted(t for t in DANGEROUS_TOOLS if STEP_NAMES.get(t, t) == t)
+        assert not _noname, "危险工具缺中文名:%s" % _noname
+
+        # ③ 旧会话残留的未知工具键不能崩(回退工具名)
+        agent_mod._grant_exemption("no_such_tool:X")
+        _labels = {i["key"]: i["label"] for i in agent_mod.session_allowed_items()}
+        assert _labels["no_such_tool:X"] == "no_such_tool", _labels
+
+        # ④ 时效:过期的既不再放行、也不再列出来(读清单即回收)
+        agent_mod._grant_exemption("delete_sheet:已过期", ttl=-1)
+        assert not agent_mod._is_exempt("delete_sheet:已过期"), "过期豁免仍在放行"
+        assert "delete_sheet:已过期" not in agent_mod._SESSION_ALLOWED_TOOLS, "过期条目未被回收"
+        assert "delete_sheet:已过期" not in agent_mod.session_allowed_tools()
+        assert "delete_sheet:已过期" not in [i["key"] for i in agent_mod.session_allowed_items()]
+        assert agent_mod._is_exempt("clear_range"), "有效豁免被误判过期"
+
+        # ⑤ 单条撤销:只撤命中那条,其余豁免不受影响;重复/未知键返回 False 而不报错
+        agent_mod.clear_session_allowed()
+        agent_mod._grant_exemption("delete_sheet:要撤")
+        agent_mod._grant_exemption("delete_rows:要留")
+        assert agent_mod.revoke_session_allowed("delete_sheet:要撤") is True
+        assert agent_mod.revoke_session_allowed("delete_sheet:要撤") is False, "重复撤销应返回未命中"
+        assert agent_mod.revoke_session_allowed("查无此键") is False
+        assert not agent_mod._is_exempt("delete_sheet:要撤"), "撤过的仍被放行"
+        assert [i["key"] for i in agent_mod.session_allowed_items()] == ["delete_rows:要留"], \
+            agent_mod.session_allowed_items()
+
+        # ⑥ 一键撤销要真的清空(桌面端与侧边栏读的是同一份状态)
+        agent_mod.clear_session_allowed()
+        assert agent_mod.session_allowed_tools() == [] \
+            and agent_mod.session_allowed_items() == [], "撤销后仍有残留"
+    finally:
+        agent_mod._SESSION_ALLOWED_TOOLS.clear()
+        agent_mod._SESSION_ALLOWED_TOOLS.update(saved)
+
+    # ⑥ 两端接线:接口都用到、条目只用 textContent 写入、剩余时间来自服务端
+    #    (arg 是模型给的参数值,拼进 innerHTML 就是注入面)
+    root = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(root, "addin", "addin.html"), encoding="utf-8") as f:
+        html = f.read()
+    for kw in ('id="f-allowed"', 'id="btn-allowed-clear"', 'id="allowed-hint"',
+               'id="cb-remember-text"', '"/api/session_allowed"',
+               '"/api/session_allowed/clear"', '"/api/session_allowed/revoke"',
+               "function renderAllowed", "loadAllowed();", "revokeOne", "cb-x",
+               "fmtLeft", "expires_in", "cb-left"):
+        assert kw in html, "侧边栏缺少会话豁免接线:%s" % kw
+    _body = html[html.index("function renderAllowed"): html.index("function loadAllowed")]
+    assert "it.arg" in _body and _body.count("textContent") >= 2, "豁免条目必须用 textContent 写入"
+    assert "expires_in" in _body, "豁免条目未渲染剩余时间"
+    import re as _re
+    assert not _re.search(r"innerHTML\s*\+=\s*[^;]*\b(it|d)\.", _body), \
+        "禁止把模型给的条目字段拼进 innerHTML"
+    assert not _re.search(r"innerHTML\s*\+=", _body), "豁免条目禁止用 += 拼 HTML"
+
+    with open(os.path.join(root, "qml", "Main.qml"), encoding="utf-8") as f:
+        qml = f.read()
+    for kw in ("ctrl.sessionAllowed", "ctrl.clearSessionAllowed", "ctrl.revokeSessionAllowed",
+               "ctrl.sessionAllowedTtl", "settingsDialog.syncExempt()",
+               "onSessionAllowedChanged", "exemptRows"):
+        assert kw in qml, "桌面端缺少会话豁免接线:%s" % kw
+    with open(os.path.join(root, "app", "qt_controller.py"), encoding="utf-8") as f:
+        ctl = f.read()
+    for kw in ("def revokeSessionAllowed", "agent.revoke_session_allowed",
+               "def clearSessionAllowed", "def _get_session_allowed"):
+        assert kw in ctl, "控制器缺少会话豁免接线:%s" % kw
+    # 时长数字只在 agent.SESSION_ALLOWED_TTL 定义一份:两端都不许写死分钟数
+    assert "30 分钟" not in html, "侧边栏把豁免时长写死了,应使用服务端下发的 ttl"
+    assert "30 分钟" not in qml, "桌面端把豁免时长写死了,应使用 ctrl.sessionAllowedTtl"
+    print("PASS 会话豁免:作用域键→中文条目+剩余秒数 / 到期自动失效且不再列出 /"
+          " 未知工具回退 / 一键撤销清空 / 两端接线且不拼 HTML")
 
 
 if __name__ == "__main__":

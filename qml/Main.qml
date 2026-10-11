@@ -77,6 +77,10 @@ ApplicationWindow {
     property int curAi: -1
     property var sidIndex: ({})
 
+    // 会话豁免时长文案(秒 → 「N 分钟」):N 只来自 agent.SESSION_ALLOWED_TTL,
+    // 确认条与设置页共用这一处,界面上不再写死数字
+    readonly property int exemptMinutes: Math.max(1, Math.round(ctrl.sessionAllowedTtl / 60))
+
     // ---------------- Fluent 控件样式(集中定义,供全文件复用) ----------------
 
     // ---------------- 图标(Windows 自带 Segoe Fluent Icons 字体,无新增依赖) ----------------
@@ -498,6 +502,10 @@ ApplicationWindow {
     // ---------------- 事件接线 ----------------
     Connections {
         target: ctrl
+        function onSessionAllowedChanged() {
+            // 豁免清单变化(勾选始终允许 / 撤销 / 到期回收):设置页开着就立刻跟随
+            if (settingsDialog.opened) settingsDialog.syncExempt()
+        }
         function onChatEvent(ev) {
             switch (ev.kind) {
             case "user_msg":
@@ -1329,9 +1337,10 @@ ApplicationWindow {
                             font.pixelSize: 11
                         }
                         Label {
-                            text: cbRemember.checked
-                                  ? qsTr("本会话内该工具不再弹确认")
-                                  : qsTr("勾选后本会话内该工具不再弹确认;不勾选按仅本次处理")
+                            text: (cbRemember.checked
+                                   ? qsTr("本会话内该工具不再弹确认")
+                                   : qsTr("勾选后本会话内该工具不再弹确认;不勾选按仅本次处理"))
+                                  + qsTr("(%1 分钟后自动失效)").arg(win.exemptMinutes)
                             font.pixelSize: 11
                             color: win.subText
                             elide: Text.ElideRight
@@ -1709,6 +1718,42 @@ ApplicationWindow {
         property var presetKeys: []
 
         property bool _watchGuard: false
+
+        // 会话豁免(「本会话始终允许」)的本地副本:剩余秒数每秒递减,归零时从 ctrl
+        // 重新取一次(服务端已回收到期项)。读 ctrl.sessionAllowed 会顺带回收到期条目。
+        property var exemptRows: []
+        function leftText(sec) {
+            var s = Math.max(0, Math.round(Number(sec) || 0))
+            return qsTr("剩 %1:%2").arg(Math.floor(s / 60)).arg(("0" + (s % 60)).slice(-2))
+        }
+        function syncExempt() {
+            var rows = ctrl.sessionAllowed || []
+            var out = []
+            for (var i = 0; i < rows.length; ++i) {
+                out.push({ key: rows[i].key, label: rows[i].label || "", arg: rows[i].arg || "",
+                           left: Math.max(0, Math.round(Number(rows[i].expires_in) || 0)) })
+            }
+            exemptRows = out
+        }
+        // 倒计时只在设置页开着且确有豁免时跑,不占后台
+        Timer {
+            id: exemptTimer
+            interval: 1000
+            repeat: true
+            running: settingsDialog.opened && settingsDialog.exemptRows.length > 0
+            onTriggered: {
+                var rows = settingsDialog.exemptRows
+                var out = []
+                var expired = false
+                for (var i = 0; i < rows.length; ++i) {
+                    var left = Math.max(0, rows[i].left - 1)
+                    if (left === 0) expired = true
+                    out.push({ key: rows[i].key, label: rows[i].label, arg: rows[i].arg, left: left })
+                }
+                settingsDialog.exemptRows = out
+                if (expired) settingsDialog.syncExempt()
+            }
+        }
         function openInstall() {
             openNormal()
             // 用纵向滚动条定位到安装区:position 是 0~1 归一化位置,要扣除滑块自身长度。
@@ -1748,6 +1793,7 @@ ApplicationWindow {
             settingsDialog._watchGuard = true
             try { watchSwitch.checked = ctrl.watchEnabled } catch (e) {}
             settingsDialog._watchGuard = false
+            syncExempt()
             open()
         }
 
@@ -2015,6 +2061,106 @@ ApplicationWindow {
                 color: win.subText
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
+            }
+
+            // ---------- 本会话豁免的危险操作(与侧边栏共用同一份状态) ----------
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.topMargin: 2
+                height: 1
+                color: win.stroke
+            }
+            Label {
+                text: qsTr("本会话豁免的危险操作")
+                font.pixelSize: 13
+                font.weight: Font.DemiBold
+                color: win.textColor
+                Layout.fillWidth: true
+            }
+            Label {
+                text: qsTr("确认危险操作时选「本会话始终允许该工具」的会列在这里,%1 分钟后自动失效;撤销后恢复逐次确认。")
+                      .arg(win.exemptMinutes)
+                font.pixelSize: 11
+                color: win.subText
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                visible: settingsDialog.exemptRows.length > 0
+                implicitHeight: exemptCol.implicitHeight + 12
+                radius: win.rControl
+                color: win.dark ? Qt.rgba(1, 1, 1, 0.03) : Qt.rgba(0, 0, 0, 0.02)
+                border.width: 1
+                border.color: win.stroke
+
+                ColumnLayout {
+                    id: exemptCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.margins: 6
+                    spacing: 4
+
+                    Repeater {
+                        model: settingsDialog.exemptRows
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            FluIcon {
+                                text: win.icoWarn
+                                font.pixelSize: 11
+                                color: win.warnColor
+                            }
+                            Label {
+                                text: modelData.label
+                                font.pixelSize: 12
+                                color: win.textColor
+                            }
+                            Item { Layout.fillWidth: true }
+                            Label {
+                                // arg 是模型给的参数值,只当文本渲染
+                                text: modelData.arg
+                                font.pixelSize: 11
+                                color: win.subText
+                                elide: Text.ElideMiddle
+                                Layout.maximumWidth: 150
+                            }
+                            Label {
+                                text: settingsDialog.leftText(modelData.left)
+                                font.pixelSize: 11
+                                color: win.subText
+                            }
+                            FluIconAction {
+                                // 单条撤销:键作为参数传回去,不做任何拼接
+                                glyph: win.icoClose
+                                glyphSize: 10
+                                implicitWidth: 22
+                                implicitHeight: 22
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("撤销这条豁免")
+                                onClicked: ctrl.revokeSessionAllowed(modelData.key)
+                            }
+                        }
+                    }
+                }
+            }
+            Label {
+                visible: settingsDialog.exemptRows.length === 0
+                text: qsTr("当前没有豁免,危险操作每次都会向你确认。")
+                font.pixelSize: 11
+                color: win.subText
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+            FluSecondaryButton {
+                text: qsTr("撤销全部豁免")
+                enabled: settingsDialog.exemptRows.length > 0
+                Layout.fillWidth: true
+                onClicked: {
+                    ctrl.clearSessionAllowed()
+                    settingsDialog.syncExempt()
+                }
             }
 
             // ---------- 示例按钮(输入框上方)增删 ----------

@@ -24,6 +24,7 @@
 """
 import os
 import shutil
+import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -479,21 +480,56 @@ def _is_frozen():
     return main is not None and hasattr(main, "__compiled__")
 
 
+def _launch_exe():
+    r"""用户实际启动的那个 exe(打包态);开发态返回当前解释器。
+
+    优先走 app.runtime.launch_exe() —— onefile 下 sys.executable 是解包缓存里的
+    python.exe(实测该文件根本不存在),写进开机自启项就等于开机静默失败。
+    以脚本方式单独运行(如 python addin\sideload.py)时 app 包可能不可导入,
+    退回同样的判据:只有 argv[0] 是原始 exe。
+    """
+    try:
+        from app import runtime
+
+        exe = runtime.launch_exe()
+        if exe:
+            return exe
+    except Exception:
+        pass
+    raw = sys.argv[0] or ""
+    if raw.lower().endswith(".exe"):
+        return os.path.abspath(raw)
+    return sys.executable
+
+
 def _watch_command():
     """返回监控进程的启动命令(list),并尽量用 pythonw 避免弹出控制台黑窗。"""
     if _is_frozen():
-        return [sys.executable, "--watch-guard"]
+        return [_launch_exe(), "--watch-guard"]
     root = os.path.dirname(HERE)
     pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     exe = pyw if os.path.isfile(pyw) else sys.executable
     return [exe, os.path.join(root, "main.py"), "--watch-guard"]
 
 
+def _watch_run_command(parts=None):
+    r"""开机自启项要写入注册表的命令行文本。
+
+    只给需要引号的片段加引号(subprocess.list2cmdline,与 CreateProcess 的解析
+    规则一致)。**不能**把整条命令包在一对引号里:那样第一个引号片段就是
+    「C:\python\pythonw.exe D:\app\main.py --watch-guard」整个字符串,
+    Windows 会把它当成一个不存在的文件名 —— 开机时静默启动失败
+    (没有控制台,用户只会发现「跟随启动没生效」)。
+    第一个引号片段必须正好是 exe 路径本身。
+    """
+    return subprocess.list2cmdline(list(parts if parts is not None else _watch_command()))
+
+
 def install_watch():
     if winreg is None:
         print("此功能只能在 Windows 上运行")
         return
-    cmd = '"%s"' % " ".join(_watch_command())
+    cmd = _watch_run_command()
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
             winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ, cmd)

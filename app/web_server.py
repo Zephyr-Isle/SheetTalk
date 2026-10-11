@@ -184,9 +184,15 @@ class _Handler(BaseHTTPRequestHandler):
                         pass
             return
         elif p == "/api/session_allowed":
-            # 会话豁免清单(确认记录抽屉)
-            from app.agent import session_allowed_tools
-            self._json({"tools": session_allowed_tools()})
+            # 会话豁免清单(侧边栏设置区的「本会话始终允许」管理)。
+            # tools 保留原始作用域键(兼容只认字符串数组的旧客户端);items 是可直接
+            # 渲染的可读条目(工具中文名 + 对象参数 + 剩余秒数);ttl 是豁免总时长,
+            # 页面用它拼「N 分钟后自动失效」的提示文案,不再各写一份数字。
+            from app.agent import (SESSION_ALLOWED_TTL, session_allowed_items,
+                                   session_allowed_tools)
+            self._json({"tools": session_allowed_tools(),
+                        "items": session_allowed_items(),
+                        "ttl": SESSION_ALLOWED_TTL})
         elif p == "/api/selection":
             # 侧边栏选区条点击预览:读当前框选的地址与内容(截断保护在桥接层)
             self._json(st["bridge"].get_selection())
@@ -240,6 +246,15 @@ class _Handler(BaseHTTPRequestHandler):
                 from app.agent import clear_session_allowed
                 clear_session_allowed()
                 self._json({"ok": True})
+            elif p == "/api/session_allowed/revoke":
+                # 撤销单条(key 来自 /api/session_allowed 的 items);顺带把撤销后的
+                # 清单回给页面,省一次往返,也避免倒计时与服务端状态错位。
+                # 未知/已过期的键 ok=False,页面按「已失效」提示并刷新。
+                from app.agent import (revoke_session_allowed, session_allowed_items,
+                                       session_allowed_tools)
+                hit = revoke_session_allowed(str(body.get("key") or ""))
+                self._json({"ok": hit, "items": session_allowed_items(),
+                            "tools": session_allowed_tools()})
             elif p == "/api/confirm":
                 # 侧边栏确认条回调:危险工具二次确认结果(remember=本会话始终允许)
                 st["session"].confirm(str(body.get("sid") or ""), bool(body.get("allowed")),

@@ -10,6 +10,8 @@ run_agent 不是生成器,通过 emit 回调逐个推送事件(dict),由 UI 层�
 
 危险工具二次确认:delete_*/clear_range/close_workbook/protect_* 执行前发 confirm
 事件并在 wait_user_confirm 阻塞等待;UI 通过 resolve_confirm(sid, allowed) 回填结果。
+用户选「本会话始终允许」得到的豁免按 SESSION_ALLOWED_TTL(30 分钟)自动失效,
+两端界面都显示剩余时间(见 session_allowed_items)。
 """
 import json
 import logging
@@ -17,7 +19,7 @@ import threading
 import time
 
 from app import llm
-from app.tools import (CORE_TOOL_NAMES, DANGEROUS_TOOLS, META_TOOLS, TOOLS,
+from app.tools import (CORE_TOOL_NAMES, DANGEROUS_TOOLS, META_TOOLS, STEP_NAMES, TOOLS,
                        dangerous_tools, retrieve_tools, validate_args,
                        brief_result)
 
@@ -27,8 +29,11 @@ HISTORY_TURNS = 16
 
 # 危险工具二次确认的等待注册表:sid → {event, allowed, tool, args, summary}
 _CONFIRM_WAIT = {}
-# 用户选过「本会话始终允许」的豁免范围:{"工具名" } 或 {"工具名:主参数"}
-_SESSION_ALLOWED_TOOLS = set()
+# 用户选过「本会话始终允许」的豁免:{作用域键: 失效时刻(time.monotonic)}。
+# 键是「工具名」或「工具名:主参数」(见 _scope_key)。会话豁免不该在长会话里
+# 无限放行:超过 SESSION_ALLOWED_TTL 秒自动失效,两端界面显示剩余时间。
+_SESSION_ALLOWED_TOOLS = {}
+SESSION_ALLOWED_TTL = 30 * 60
 # 确认请求监听(web_server SSE 推送用):回调在 agent 线程,须自行线程安全
 _CONFIRM_LISTENERS = []
 
@@ -129,15 +134,19 @@ def startup_selfcheck():
     except Exception as e:
         issues.append(f"工具自检异常:{e}")
 
-    # ③ 会话豁免作用域不变量:同对象豁免、异对象隔离
+    # ③ 会话豁免的作用域与时效不变量:同对象豁免、异对象隔离、到期自动失效
     try:
         _SESSION_ALLOWED_TOOLS.clear()
         k1 = _scope_key("delete_sheet", {"name": "A"})
-        _SESSION_ALLOWED_TOOLS.add(k1)
-        if _scope_key("delete_sheet", {"name": "B"}) in _SESSION_ALLOWED_TOOLS:
-            issues.append("会话豁免:作用域未隔离(不同对象被放行)")
-        if k1 not in _SESSION_ALLOWED_TOOLS:
+        _grant_exemption(k1)
+        if not _is_exempt(k1):
             issues.append("会话豁免:同对象豁免丢失")
+        if _is_exempt(_scope_key("delete_sheet", {"name": "B"})):
+            issues.append("会话豁免:作用域未隔离(不同对象被放行)")
+        # 键名带 __selfcheck__ 前缀:到期回收会写日志,一眼能看出是自检造的而不是用户数据
+        _grant_exemption("__selfcheck_expired__", ttl=-1)
+        if _is_exempt("__selfcheck_expired__") or "__selfcheck_expired__" in _SESSION_ALLOWED_TOOLS:
+            issues.append("会话豁免:到期未自动失效")
         _SESSION_ALLOWED_TOOLS.clear()
     except Exception as e:
         issues.append(f"会话豁免自检异常:{e}")
@@ -159,9 +168,69 @@ def _scope_key(tool, args):
     return f"{tool}:{primary}"
 
 
+def _grant_exemption(scope, ttl=None):
+    """记一条会话豁免:默认 SESSION_ALLOWED_TTL 秒后自动失效(ttl 仅供自检/测试)。"""
+    _SESSION_ALLOWED_TOOLS[str(scope)] = time.monotonic() + (
+        SESSION_ALLOWED_TTL if ttl is None else ttl)
+
+
+def _prune_session_allowed(now=None):
+    """回收已到期的豁免:两端读清单前都先走这里,过期的不会再显示出来。"""
+    now = time.monotonic() if now is None else now
+    for key, expires_at in list(_SESSION_ALLOWED_TOOLS.items()):
+        if expires_at <= now:
+            _SESSION_ALLOWED_TOOLS.pop(key, None)
+            log.info("会话豁免已到期自动失效:%s", key)
+
+
+def _is_exempt(*scopes):
+    """这些作用域键里是否有仍然有效的豁免;顺手回收已到期的条目。"""
+    now = time.monotonic()
+    for scope in scopes:
+        if not scope:
+            continue
+        expires_at = _SESSION_ALLOWED_TOOLS.get(scope)
+        if expires_at is None:
+            continue
+        if expires_at > now:
+            return True
+        _SESSION_ALLOWED_TOOLS.pop(scope, None)
+        log.info("会话豁免已到期自动失效:%s", scope)
+    return False
+
+
 def session_allowed_tools():
-    """当前会话豁免清单(供 UI 抽屉展示)。"""
+    """当前仍然有效的会话豁免作用域键(过期的先回收)。"""
+    _prune_session_allowed()
     return sorted(_SESSION_ALLOWED_TOOLS)
+
+
+def session_allowed_items():
+    """豁免清单的可读条目:{key, tool, label, arg, expires_in}(两端界面共用)。
+
+    label 取 tools.STEP_NAMES 的中文名(未知工具回退工具名),界面不必自备名表;
+    expires_in 是剩余秒数,两端各自本地倒计时,不必反复回查。
+    arg 是模型给的参数值,前端只允许当文本渲染(不得拼进 HTML)。
+    """
+    _prune_session_allowed()
+    now = time.monotonic()
+    items = []
+    for key, expires_at in sorted(_SESSION_ALLOWED_TOOLS.items()):
+        tool, _, arg = str(key).partition(":")
+        items.append({"key": str(key), "tool": tool, "label": STEP_NAMES.get(tool, tool),
+                      "arg": arg, "expires_in": max(0, int(round(expires_at - now)))})
+    return items
+
+
+def revoke_session_allowed(scope):
+    """撤销单条会话豁免(scope 取 session_allowed_items 里的 key)。
+
+    返回是否真撤到了一条:未知/已过期的键返回 False 而不报错 —— 两端都可能
+    拿着稍早拿到的清单去点撤销,键在这中间自然过期是正常情况。
+    """
+    hit = _SESSION_ALLOWED_TOOLS.pop(str(scope), None) is not None
+    log.info("撤销会话豁免:%s(%s)", scope, "已撤销" if hit else "不存在或已过期")
+    return hit
 
 
 def clear_session_allowed():
@@ -175,6 +244,7 @@ def resolve_confirm(sid, allowed, remember=False):
 
     remember=True 且允许时,把该操作的「作用域键」加入会话级允许清单
     (工具名+主参数),之后同范围操作不再重复确认;换对象仍会确认。
+    豁免带时效:SESSION_ALLOWED_TTL 秒后自动失效,重新回到逐次确认。
     """
     st = _CONFIRM_WAIT.get(str(sid))
     if not st:
@@ -185,16 +255,25 @@ def resolve_confirm(sid, allowed, remember=False):
     if st.get("tool"):
         scope = _scope_key(st["tool"], st.get("args"))
         if allowed and remember:
-            _SESSION_ALLOWED_TOOLS.add(scope)
+            _grant_exemption(scope)
+            log.info("已加入会话豁免(%d 分钟后失效):%s", SESSION_ALLOWED_TTL // 60, scope)
         elif not allowed:
-            _SESSION_ALLOWED_TOOLS.discard(scope)
+            _SESSION_ALLOWED_TOOLS.pop(scope, None)
     st["event"].set()
     return True
 
 SYSTEM_TEMPLATE = """你是 Excel 智能助手,运行在一个独立的桌面应用里,通过 COM 接口直接操作用户当前打开的表格(同时支持 Microsoft Excel 与 WPS 表格)。
 
+【参数契约】所有工具都按这个口径传参(数字/数组写歪会被自动纠正,表名与区域写错则直接失败):
+- sheet:要操作的工作表名,省略=当前活动工作表;工作表名必须来自上下文里的 sheets 列表,不要凭空编。
+- 区域参数(cell_range / data_range / source_range 等)一律 A1 样式、只写区域本身(如 "A2:D100"、"C5"),不要带工作表名和 $;要动别的表用 sheet 参数。
+- 数组参数必须是 JSON 数组:字段名写 ["地区","产品"]、颜色写 ["FFC7CE"],不要写成一个字符串。
+- 列序号/行序号是从 1 开始的整数,多数工具是「相对所选区域的序号」(sort_range 的 column_index=2 指该区域的第 2 列,不是工作表的 B 列)。
+- 上下限:单次读取约 500 格、单次写入 ≤ 10 万格,超出会被截断或报错;结果里出现 note 说明被截断,要缩小区域或分块再读。
+- 数值/布尔参数不要加引号:width 写 20 而不是 "20";call_tool 的 args 是 JSON 对象,不是字符串。
+
 工作规则:
-1. 动手修改之前,先用 get_workbook_overview / get_sheet_preview / read_range 弄清数据结构:表头在哪一行、数据从第几行开始、每列是什么含义。
+1. 动手修改之前,先用 get_workbook_overview / get_sheet_preview / read_range 弄清数据结构:表头在哪一行、数据从第几行开始、每列是什么含义;后面要用到字段名的地方(透视表/图表/公式)必须以读到的表头为准,不要猜。
 2. 写公式一律使用英文函数名和英文逗号分隔,如 =SUMIFS(C2:C100,A2:A100,"华东")。程序会以 Formula 形式写入,Excel/WPS 会自动本地化显示。
 3. 整列同构公式优先用 autofill_formula:先在第一个单元格写好公式,再填充到整个区域;不要逐格重复写公式。
 4. write_range 中以 = 开头的字符串会被当作公式;普通文本数据不要带等号。
@@ -203,17 +282,17 @@ SYSTEM_TEMPLATE = """你是 Excel 智能助手,运行在一个独立的桌面应
 7. 全程用简体中文(包括调用工具前的简短叙述),语气简洁专业,可以用 Markdown(标题、列表、表格、代码块)组织内容。完成后用两三句话总结:做了什么、结果在哪里。遇到失败,解释原因并给出手动操作建议。不要在正文里写「[调用 xxx]」式的伪工具日志 —— 工具执行会自动以步骤卡片展示,正文只写给用户看的内容。
 8. 如果用户的请求和表格无关,直接回答即可,不需要调用工具。
 9. 用户可能只在表格里选中了一块区域就来提问。优先围绕「当前选中区域」作答:
-   直接引用它的地址与内容,不要再去全表搜索;除非用户明确说了要看整表。
+   直接引用它的地址与内容,不要再去全表搜索;除非用户明确说了要看整表。上下文里没有选区块时,不要假装看到了选区。
 10. 做「分组统计 / 汇总」优先用 create_pivot(数据透视表),它比手写 SUMIF 更清晰、
-    结果可直接下钻;只要一个数字时用 Excel 公式即可。
+    结果可直接下钻;只要一个数字时用 Excel 公式即可。透视表的 rows/columns/values 只能是表头字段名(JSON 数组),字段名写错会报「找不到成员」。
 11. 让数据更容易看用条件格式:比较大小用 color_scale(色阶)或 data_bar(数据条),
     超标预警用 cell_value(如大于目标值标红),找重复值用 duplicate。
-12. 数据脏了先清洗:重复行用 remove_duplicates,想固定输入选项用 set_validation
-    (下拉列表),要规范表格外观用 create_table(可带汇总行)。
+12. 数据脏了先清洗:重复行用 remove_duplicates(columns 传列序号数组,如 [1,2];省略=整行比对),想固定输入选项用 set_validation
+    (下拉列表,选项串总长不超过 255 字符),要规范表格外观用 create_table(可带汇总行)。
 13. 注意:同一区域重复设置条件格式/筛选/转表是幂等的,可以直接重跑;但透视表每次
-    都会新建一张,别对同一份数据反复建透视表。
+    都会新建一张,别对同一份数据反复建透视表。去重、删除行列、清空区域、覆盖写入都会改到用户数据,动手前先读一遍确认范围。
 14. 常用控制手段:批量改文本用 find_replace(不要逐格写);增删行/列用
-    insert_rows / delete_rows / insert_columns / delete_columns;合并/取消合并用
+    insert_rows / delete_rows / insert_columns / delete_columns(行列都传整数序号);合并/取消合并用
     merge_cells;冻结表头用 freeze_panes(冻结首行填 A2);删除图表用 delete_chart;
     取消表格对象用 delete_table;问「这格的公式」用 get_cell_formula;
     跨表搬运数据用 copy_range;加边框用 set_format(border=thin/medium/thick);
@@ -227,18 +306,24 @@ SYSTEM_TEMPLATE = """你是 Excel 智能助手,运行在一个独立的桌面应
 16. 工作簿级:打开/另存为/导出 PDF/文档属性/保护工作簿/定义名称(get_names 看
     现有名称)/刷新数据连接/计算模式与重算;工作表级:移动/标签颜色/网格线/
     页面设置/打印区域与打印标题/缩放/拆分窗格/显示公式;区域级:批注/分列/
-    格式刷/字体名/下划线/删除线/缩进/锁定与隐藏公式(需配合 protect_sheet 生效);
+    格式刷/字体名/下划线/删除线/缩进/锁定与隐藏公式(先 set_format(locked/hide_formula),再 protect_sheet 才生效);
     数据分析:高级筛选(需先在表旁搭条件区域)/行分组/合并计算/单变量求解;
     图表进阶:config_chart 改类型标题图例标签、add_trendline 趋势线、
     refresh_pivot/delete_pivot 维护透视表。print_sheets 会真实打印,用户没明确
     要求打印时不要调用。
 17. 上面没列全:还有更多工具可用 search_tools 按需求搜索(返回工具名与参数),
     再用 call_tool(name, args) 调用。不要凭空猜测未列出的工具名;
-    search_tools 也用于确认某类操作是否存在。
+    search_tools 也用于确认某类操作是否存在;拿到名字后用 call_tool 调用,它的 args 必须是 JSON 对象。
 18. 删除工作表/删除行列/删除图表/清空区域/关闭工作簿等破坏性操作会先弹确认条,
     用户可在下拉里选「仅本次允许」「本会话始终允许」或「拒绝执行」:
     用户确认前不要继续别的动作;拒绝后改提替代方案,不要换个名字重试;
-    用户选了「始终允许」后,同类操作直接执行即可,不要再反复打扰。
+    用户选了「始终允许」后,同类操作直接执行即可,不要再反复打扰(该豁免过一段时间会
+    自动失效,届时同类操作会重新弹确认,这是正常现象,不要当成用户改了主意)。
+    一次只发起一个需要确认的操作,等它出结果再继续。
+19. 多条件筛选:auto_filter 一次只支持一个条件(再调一次会替换上一个);要按多个条件过滤就用 advanced_filter(先在表旁写好条件区域,再传 criteria_range)。给区域建表/去重前不需要自己先关筛选,程序内部已经处理。
+20. 工具返回 {"error": ...} 时先读懂原因再决定下一步:参数校验失败就按提示改参数(数组要写成 JSON 数组);「找不到工作表/成员/图表」就以读到的真实名字重试一次;同一个原因不要试第三次,直接说明原因和手动做法。
+21. 写完重要数据后用 read_range / get_cell_formula 回读一小块核对(尤其批量写入、公式填充、排序之后),确认无误再汇报;不要只凭工具摘要就说「已完成」。
+22. 上下文里若显示打开了多个工作簿而用户没有指明,先一句话问清要操作哪一个,不要猜(程序默认跟随用户当前可见的工作簿)。
 
 当前表格上下文(快照,可能滞后):
 {context}
@@ -246,7 +331,7 @@ SYSTEM_TEMPLATE = """你是 Excel 智能助手,运行在一个独立的桌面应
 
 
 PLAN_PROMPT = """用户想在 Excel 里完成下面这件事。请先用中文给出 3–6 步可执行计划,
-每步一行,以「1. 2. 3.」开头,说明要做什么、涉及哪张表的哪个区域。不要执行,只列计划。
+每步一行,以「1. 2. 3.」开头,写清:动作 + 目标工作表与区域(如 Sheet1!A2:D100)+ 要用的工具名;最后追加一行以「校验:」开头,说明改完怎么核对结果。不要执行,只列计划。
 用户需求:{user_text}"""
 
 MAX_SELECTION_CELLS = 200
@@ -421,16 +506,24 @@ def run_agent(bridge, settings, history, user_text, executor, emit, cancel=None,
                 # call_tool 展开内层工具;确认门按「内层工具名」判断:
                 # 危险操作无论从哪条路径来都必须过确认/会话允许,不能绕过
                 _scope = _scope_key(step_name, step_args)
+                # 豁免带时效:过期的在这里被回收,操作重新回到逐次确认
                 if step_name in DANGEROUS_TOOLS \
-                        and step_name not in _SESSION_ALLOWED_TOOLS \
-                        and _scope not in _SESSION_ALLOWED_TOOLS \
+                        and not _is_exempt(step_name, _scope) \
                         and settings.get("confirm_dangerous", True):
                     _summary = executor.describe(step_name, step_args)
                     # 先登记等待、再发事件(防 UI 抢先回传导致确认丢失)
                     evc = arm_confirm(tc_id, step_name, _summary)
                     emit({"type": "confirm", "sid": tc_id, "tool": step_name,
                           "summary": _summary})
-                    if not wait_confirm_event(evc, _CONFIRM_WAIT[tc_id], cancel):
+                    try:
+                        allowed = wait_confirm_event(evc, _CONFIRM_WAIT[tc_id], cancel)
+                    finally:
+                        # 无论允许 / 拒绝 / 超时 / 中止都要销号:残留的未决条会被
+                        # /api/pending_confirm 与 confirm SSE 反复推给侧边栏,
+                        # 弹出一个人早已放弃的确认条(且字典只增不减)。
+                        # 晚到的回传此刻 resolve_confirm 找不到条目 → 返回 False,正确。
+                        _CONFIRM_WAIT.pop(tc_id, None)
+                    if not allowed:
                         result = {"error": "用户未确认该操作,已跳过执行"}
                     else:
                         result = executor.execute(step_name, step_args)

@@ -72,7 +72,9 @@ def _icon_ico_path():
     - 找不到时回退到 %APPDATA% 现场生成单尺寸 ico(兜底,设计略有差异)
     """
     if runtime.is_frozen():
-        return sys.executable
+        # 图标已内嵌进 exe,直接指向 exe;必须是「用户启动的那个 exe」,
+        # onefile 下 sys.executable 指向解包缓存里并不存在的 python.exe。
+        return runtime.launch_exe() or sys.executable
     repo_ico = os.path.join(_project_root(), "assets", "icon.ico")
     if os.path.isfile(repo_ico):
         return repo_ico
@@ -99,7 +101,10 @@ def _icon_ico_path():
 def _shortcut_target():
     """返回 (可执行文件, 参数, 工作目录);打包态直接指向 exe。"""
     if runtime.is_frozen():
-        return sys.executable, "", os.path.dirname(sys.executable)
+        # 快捷方式必须指向「用户启动的那个 exe」,否则变成指向解包缓存里
+        # 的 python.exe —— 点开报「找不到文件」,缓存清理后永久失效。
+        exe = runtime.launch_exe() or sys.executable
+        return exe, "", os.path.dirname(exe)
     # 开发态:优先 pythonw.exe(无黑窗),参数是 main.py
     pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     exe = pyw if os.path.isfile(pyw) else sys.executable

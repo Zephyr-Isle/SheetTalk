@@ -11,6 +11,7 @@
 import json
 import logging
 import os
+import re
 
 from app.excel_bridge import BridgeError
 
@@ -625,6 +626,24 @@ def dangerous_tools():
     return DANGEROUS_TOOLS | _load_dangerous_rules()
 
 
+def _coerce_array(value):
+    """纠正数组参数:模型常把数组写成裸字符串("华东" 而非 ["华东"])。
+
+    不纠正的话裸字符串会被下游当成可迭代对象逐字符展开 —— print_sheets("Sheet1")
+    会变成 ['S','h','e','e','t','1'](真的去打印 6 张不存在的表),
+    consolidate("Sheet1!A1:B10") 会报「无法解析区域引用:S」。
+    括号内多项(中文逗号也认)按分隔符拆开;None/空串保持原样(走工具默认值)。
+    """
+    if value is None:
+        return value, True
+    if isinstance(value, (list, tuple)):
+        return list(value), True
+    if isinstance(value, str):
+        parts = [x.strip() for x in re.split(r"[,，]", value) if x.strip()]
+        return (parts or None), True
+    return [value], True
+
+
 def _coerce(value, typ):
     """按 schema 类型纠正模型参数(模型常把数字传成字符串等)。"""
     try:
@@ -659,17 +678,43 @@ def _coerce(value, typ):
 def validate_args(params, args):
     """按工具的 parameters(JSON Schema 子集)校验并纠正 args。
 
-    支持子集:type / required / properties / enum / items;未声明的键原样保留。
-    返回 (纠正后的 args, 错误列表);错误非空时不应执行。
+    支持子集:type / required / properties / enum(array 还会做形状归一化);
+    未声明的键原样保留。返回 (纠正后的 args, 错误列表);错误非空时不应执行。
+
+    args 不是对象时也要兜住:本模块承诺「工具永不抛异常」,而模型很容易把
+    参数写成 JSON 字符串(尤其 call_tool 的 args 字段)。能解析就解析,
+    解析不出就记一条错误 —— 绝不能静默按空参数执行(close_workbook 之类
+    的工具拿空参数是会真动手的)。
     """
-    args = dict(args or {})
     errors = []
+    if args is None:
+        args = {}
+    elif isinstance(args, str):
+        raw = args.strip()
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            args = parsed
+        else:
+            args = {}
+            if raw:
+                errors.append('参数必须是 JSON 对象,如 {"cell_range": "A1:B2"}')
+    elif not isinstance(args, dict):
+        args = {}
+        errors.append("参数必须是 JSON 对象")
+    else:
+        args = dict(args)
     props = (params or {}).get("properties") or {}
     for key, rule in props.items():
         if key not in args:
             continue
         typ = rule.get("type")
-        if typ and typ not in ("object", "array"):
+        if typ == "array":
+            coerced, _ = _coerce_array(args[key])
+            args[key] = coerced
+        elif typ and typ != "object":
             coerced, ok = _coerce(args[key], typ)
             if ok:
                 args[key] = coerced
@@ -701,6 +746,194 @@ META_TOOLS = [
             "name": {"type": "string"}, "args": {"type": "object"}},
             "required": ["name"]}}},
 ]
+
+# ---------- 参数说明补全 ----------
+# 工具级 description 说清了「这个工具干什么」,但 200+ 个参数里绝大多数没有逐字段
+# 说明,模型只能靠名字猜(比如 fill_color 要不要带 #、create_pivot 的 columns 是
+# 字段名还是列序号、insert_rows 的 row 是插在哪)。这里按参数名集中维护中文说明,
+# 导入时一次性补进 schema:同名同义进 _PARAM_DOCS,同名不同义进
+# _TOOL_PARAM_DOCS(键为「工具名, 参数名」)。已有 description 的参数不动。
+# 新增工具时在这里补一行即可;selftest 会断言「不允许存在没有说明的参数」。
+_PARAM_DOCS = {
+    # 位置与区域(所有工具口径一致:A1 样式、不带工作表名、序号从 1 开始)
+    "sheet": "工作表名;省略=当前活动工作表(名字必须来自上下文里的 sheets 列表)",
+    "cell_range": "A1 样式区域,如 \"A2:D100\";只写区域本身,不要带工作表名和 $",
+    "cell": "单个单元格地址,如 C3",
+    "data_range": "作为数据源的区域(含表头行)",
+    "source_range": "源区域",
+    "target_range": "目标区域(通常要与源区域尺寸一致)",
+    "target_start": "粘贴/汇总结果的起始单元格,如 E2",
+    "target_cell": "公式所在的目标单元格,如 E2",
+    "target_sheet": "目标工作表名;省略=与源区域同一张表",
+    "anchor": "图表/透视表左上角落在哪个单元格(图表默认 H2);透视表省略时会自动落在数据右侧并避开已用区域",
+    "row": "行号,从 1 开始",
+    "column_index": "相对该区域的第几列(从 1 开始,不是工作表的列序号)",
+    "column_index2": "第二排序键:相对该区域的第几列(从 1 开始)",
+    "descending": "true=降序;false 或省略=升序",
+    "descending2": "第二排序键的方向:true=降序",
+    "has_header": "区域首行是否为表头(排序/去重时用于把它们排除在外)",
+    "count": "数量(整数,不少于 1)",
+    "start_cell": "写入起点(区域左上角),如 A2",
+    "content": "要写入的值;以 = 开头会按公式写入",
+    "source_cell": "起始单元格,如 C2(公式从这里开始按相对引用填充)",
+    "start_row": "起始行号(从 1 开始,含该行)",
+    "end_row": "结束行号(从 1 开始,含该行)",
+    "ungroup": "true=取消分组;false 或省略=建立分组",
+    "max_rows": "最多返回多少行(默认 10)",
+    "max_cols": "最多返回多少列(默认 15)",
+    # 格式(set_format 一族)
+    "bold": "加粗",
+    "italic": "斜体",
+    "font_size": "字号(磅),如 11",
+    "font_color": "字体颜色,十六进制 RGB、不带 #,如 FF0000",
+    "fill_color": "单元格填充色,十六进制 RGB、不带 #(如 FFF2CC);空串=清除填充",
+    "number_format": "Excel 数字格式代码,如 0.00%、#,##0、yyyy-mm-dd、@",
+    "align": "水平对齐",
+    "vertical": "垂直对齐",
+    "wrap_text": "true=自动换行",
+    "font_name": "字体名,如 微软雅黑 / Consolas",
+    "underline": "下划线",
+    "strikethrough": "删除线",
+    "indent": "缩进级别,0–15",
+    "border": "边框粗细;省略=不改边框(各工具的细度不同,以工具说明为准)",
+    "locked": "锁定单元格(需先用 protect_sheet 保护工作表才生效)",
+    "hide_formula": "隐藏公式(需先用 protect_sheet 保护工作表才生效)",
+    "width": "列宽(以字符数为单位,常用 8–40)",
+    "height": "行高(磅,默认约 14.5)",
+    "percent": "缩放百分比(10–400)",
+    "color": "十六进制颜色、不带 #,如 FF8800;省略=清除",
+    "center": "true(默认)=合并后居中",
+    # 条件格式 / 数据验证 / 筛选
+    "rule": "条件格式类型:color_scale 色阶 / data_bar 数据条 / icon_set 图标集 / cell_value 按值 / duplicate 重复值 / top_bottom 前后 N 名",
+    "operator": "比较运算符(cell_value 规则用);bottom 用于 top_bottom 的末 N 名",
+    "value": "参与比较的数值",
+    "colors": "颜色数组,十六进制 RGB 字符串,如 [\"FFC7CE\"]",
+    "icon_set": "图标集名称:3_arrows / 3_arrows_gray / 3_flags / 3_traffic_lights / 3_signs / 4_arrows / 5_quarters / 5_rating",
+    "minimum": "区间下限(含)",
+    "maximum": "区间上限(含)",
+    "field": "按第几列筛选(相对区域的 1 基序号;区域里第一列填 1)",
+    "criteria": "筛选条件文本,如 \">100\"、\"<>\"、\"华东\"",
+    "criteria_range": "含表头的条件区域,如 G1:G2(按同一行的各列条件同时成立来筛选)",
+    "copy_to": "筛选结果复制到的起始单元格;省略=原地筛选",
+    "unique_only": "true=只保留不重复的记录",
+    "find": "要查找的文本",
+    "replace": "替换成什么;传空串=把匹配内容清空",
+    "whole_cell": "true=整格精确匹配;false(默认)=包含即匹配",
+    "case_sensitive": "true=区分大小写;false(默认)=不区分",
+    # 表格对象 / 打印 / 页面
+    "style": "表格样式名,如 TableStyleMedium2;省略=默认样式",
+    "show_totals": "true=加汇总行",
+    "totals_column": "对哪列求和:\"last\" 表示最后一列,也可填列字母或列序号",
+    "sheets": "工作表名数组;省略=当前活动表",
+    "copies": "打印份数(默认 1)",
+    "orientation": "portrait 纵向 / landscape 横向",
+    "fit_to_width": "宽度缩放到几页(1=一页宽,高度不限)",
+    "paper_size": "纸张大小:A4 / A3 / B5 / letter",
+    # 文件与工作簿
+    "path": "目标文件的绝对路径",
+    "file_format": "另存的文件格式常量(51=xlsx、52=xlsm、56=xls、6=csv);省略=按扩展名推断",
+    "password": "保护密码;省略=只保护不设密码",
+    "protect": "true=启用保护;false 或省略=取消保护",
+    "visible": "true=显示;false=隐藏",
+    "show": "true=显示公式;false=恢复显示计算结果",
+    "save": "true=先保存再关闭(从未保存过的新工作簿会报错)",
+    "mode": "计算模式:auto 自动(默认)/ manual 手动 / semiauto 半自动",
+    "after": "放在该工作表之后(工作表名)",
+    "before": "放在该工作表之前(工作表名)",
+    "position": "1 基目标位置(1=移到最前)",
+    "contents_only": "true(默认)=只清内容;false=连格式一起清",
+    "refers_to": "引用内容,用绝对引用,如 =Sheet1!$A$1:$A$10",
+    "url": "超链接地址(可带 # 锚点,支持 http/https/file)",
+    "delimiter": "分隔符:逗号/分号/空格/制表符,或直接给单个字符",
+    "sources": "要汇总的「工作表!区域」列表,如 [\"Sheet1!A1:B10\", \"Sheet2!A1:B10\"]",
+    "agg": "值字段的汇总方式;省略=sum 求和",
+    "values_only": "true=只粘贴值(去掉公式与数字格式)",
+    "transpose": "true=转置粘贴(行列对调)",
+    "function": "汇总函数:sum 求和 / average 平均 / count 计数 / max 最大 / min 最小",
+    "top_row": "true=用源区域首行做列标签,按标签对齐汇总",
+    "left_column": "true=用源区域首列做行标签,按标签对齐汇总",
+    "target_value": "想让目标公式达到的结果值,如 100000",
+    "changing_cell": "要反复调整的可变单元格,如 B2",
+    # 图表
+    "chart_type": "图表类型:column 柱状 / bar 条形 / line 折线 / pie 饼图 / area 面积 / scatter 散点 / doughnut 圆环 / radar 雷达",
+    "legend": "true=显示图例;false=隐藏",
+    "data_labels": "true=显示数据标签;false=隐藏",
+    # 文档属性
+    "author": "文档作者",
+    "subject": "文档主题",
+    "keywords": "文档关键词",
+    "comments": "文档备注",
+    # 元工具
+    "query": "用自然语言描述你的需求,如「列宽」「条件格式」「导入导出」",
+    "args": "该工具的参数对象,字段名按 search_tools 返回的 parameters 填",
+}
+
+# 同名但含义随工具变化的参数,只能逐个工具写(以工具说明里的用法为准)
+_TOOL_PARAM_DOCS = {
+    ("add_sheet", "name"): "新工作表的名称",
+    ("copy_sheet", "name"): "复制出来的新工作表名称",
+    ("delete_sheet", "name"): "要删除的工作表名(取自上下文里的 sheets 列表)",
+    ("create_table", "name"): "表格对象名;省略=自动命名(Table1/Table2…)",
+    ("delete_table", "name"): "要取消的表格对象名;省略=该表上所有表格对象",
+    ("delete_chart", "name"): "要删除的图表名,如 \"图表 1\";省略=删该表全部图表",
+    ("config_chart", "name"): "要修改的图表名(create_chart 的结果里会返回)",
+    ("add_trendline", "name"): "在哪张图表上加趋势线(图表名)",
+    ("refresh_pivot", "name"): "要刷新的透视表名(create_pivot 的结果里会返回)",
+    ("delete_pivot", "name"): "要删除的透视表名",
+    ("close_workbook", "name"): "要关闭的工作簿名,如 销售.xlsx;省略=当前活动工作簿",
+    ("define_name", "name"): "定义名称(工作簿内唯一),如 税率",
+    ("call_tool", "name"): "要调用的工具名(search_tools 返回的名字)",
+    ("write_range", "values"): "要写入的二维数组(行×列),如 [[\"地区\",\"销售额\"],[\"华东\",120]]",
+    ("create_pivot", "values"): "值字段名数组(表头字段名),如 [\"销售额\"];省略=自动取第一个数值列",
+    ("create_pivot", "rows"): "行标签字段名数组(表头字段名),如 [\"地区\"]",
+    ("create_pivot", "columns"): "列标签字段名数组(表头字段名),如 [\"产品\"];不需要交叉表可省略",
+    ("set_validation", "kind"): "校验类型:list 下拉列表 / whole 整数区间 / decimal 小数区间 / text_length 文本长度 / date 日期区间",
+    ("set_validation", "values"): "下拉选项数组(kind=list 时必填),如 [\"是\",\"否\"]",
+    ("remove_duplicates", "columns"): "参与比对的列序号数组(相对区域,1 基),如 [1,2];省略=整行比对",
+    ("set_print_titles", "rows"): "每页重复的行区域,如 \"1:1\";省略=不重复行",
+    ("set_print_titles", "columns"): "每页重复的列区域,如 \"A:A\";省略=不重复列",
+    ("set_visible", "kind"): "隐藏什么:row 行 / column 列 / sheet 工作表",
+    ("set_visible", "target"): "要处理的对象:kind=row 填行号(如 \"5\" 或 \"5:8\")、kind=column 填列字母或序号、kind=sheet 填工作表名",
+    ("add_trendline", "kind"): "趋势线类型:linear 线性 / logarithmic 对数 / power 幂",
+    ("auto_filter", "action"): "on 打开筛选(默认)/ off 取消该表的筛选",
+    ("merge_cells", "action"): "merge 合并(默认)/ unmerge 取消合并",
+    ("set_comment", "text"): "批注内容;传空串=清除该单元格的批注",
+    ("set_hyperlink", "text"): "单元格显示的文本;省略=沿用单元格原有内容",
+    ("set_column_width", "column"): "列字母(如 C)或 1 基列序号(如 3)",
+    ("insert_columns", "column"): "在第几列前插入(1 基列序号)",
+    ("delete_columns", "column"): "从第几列开始删(1 基列序号)",
+    ("insert_rows", "row"): "从第几行开始插入(1 基行号,原数据下移)",
+    ("delete_rows", "row"): "从第几行开始删(1 基行号,下方数据上移)",
+    ("set_row_height", "row"): "行号(1 基)",
+    ("freeze_panes", "cell"): "冻结点:冻结线右下方第一个单元格(冻结首行填 A2,首行首列填 B2);省略或空串=取消冻结",
+    ("split_panes", "cell"): "拆分点右下方第一个单元格,如 B2;省略或空串=取消拆分",
+    ("create_chart", "title"): "图表标题;省略=不加标题",
+    ("config_chart", "title"): "图表标题;传空串=隐藏标题",
+    ("set_doc_properties", "title"): "文档标题",
+    ("rename_sheet", "old"): "原工作表名(取自上下文里的 sheets 列表)",
+    ("rename_sheet", "new"): "新工作表名;不能与现有表重名,也不能含 : \\ / ? * [ ]",
+}
+
+
+def _apply_param_docs(tools):
+    """给没有 description 的参数补上中文说明(导入时执行一次)。
+
+    已经手写过 description 的参数原样保留;两张表都查不到的参数保持空白,
+    selftest 会把它当成缺陷报出来,避免新工具带着「靠猜的参数」上线。
+    """
+    for t in tools:
+        fn = t.get("function") or {}
+        props = ((fn.get("parameters") or {}).get("properties") or {})
+        for name, spec in props.items():
+            if not isinstance(spec, dict) or spec.get("description"):
+                continue
+            doc = _TOOL_PARAM_DOCS.get((fn.get("name"), name)) or _PARAM_DOCS.get(name)
+            if doc:
+                spec["description"] = doc
+
+
+_apply_param_docs(TOOLS)
+_apply_param_docs(META_TOOLS)
 
 STEP_NAMES = {
     "get_workbook_overview": "获取工作簿概况",
@@ -930,7 +1163,13 @@ class Executor:
         # schema 校验/纠正:模型常把数字传成字符串、漏掉枚举值,先纠正再执行
         schema = next((t["function"].get("parameters") for t in TOOLS
                        if t["function"]["name"] == name), None)
-        args, errs = validate_args(schema, args)
+        try:
+            args, errs = validate_args(schema, args)
+        except Exception as e:
+            # 兜底:execute 对上层承诺「永远返回 dict」(agent 直接把它当 tool 消息回填),
+            # 校验阶段万一抛了也不能让整轮对话以「内部错误」收尾。
+            log.warning("参数校验异常 %s: %s", name, e)
+            return {"error": f"参数校验失败:{e}"}
         if errs:
             return {"error": "参数校验失败:" + ";".join(errs)}
         log.info("工具调用 %s args=%s", name, json.dumps(args, ensure_ascii=False)[:200])

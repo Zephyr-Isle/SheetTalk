@@ -411,12 +411,16 @@ class ExcelBridge:
             else:
                 return self._no_workbook(str(e))
         except Exception:
+            # 与上面的 BridgeError 分支同构:切到「带工作簿」的实例后重拍快照,
+            # 成功就继续往下走 —— 这里曾经无条件 return,重拍成功的快照被丢弃,
+            # 界面照样显示「无工作簿」(重拍等于白做)。
             if self._switch_to_workbook():
                 try:
                     info = self.worker.submit(self._snapshot, timeout=20)
                 except Exception:
                     return self._no_workbook("没有打开的工作簿")
-            return self._no_workbook("没有打开的工作簿")
+            else:
+                return self._no_workbook("没有打开的工作簿")
         info.update({"connected": True, "host": self.host_kind, "host_label": self.host_label,
                     "pinned": self._pinned})
         return info
@@ -1950,16 +1954,6 @@ class ExcelBridge:
             ws = self._ws(sheet)
             ws.PivotTables(str(name)).TableRange2.Clear()
             return {"deleted_pivot": str(name)}
-        return self._call(_do)
-
-    # ---------- 公式/视图(显示公式) ----------
-
-    def set_display_formulas(self, sheet, show=True):
-        def _do():
-            ws = self._ws(sheet)
-            ws.Activate()
-            self.app.ActiveWindow.DisplayFormulas = bool(show)
-            return {"display_formulas": bool(show), "sheet": ws.Name}
         return self._call(_do)
 
     def save_workbook(self):

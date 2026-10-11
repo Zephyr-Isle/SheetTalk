@@ -37,7 +37,8 @@ class ChatSession:
     def confirm(self, sid, allowed, remember=False):
         """回传危险工具二次确认的结果(桌面 ctrl / HTTP /api/confirm 调用)。
 
-        remember=True 且 allowed=True 时,该工具在本会话内不再重复确认。
+        remember=True 且 allowed=True 时,该工具在本会话内不再重复确认;
+        该豁免带时效(见 agent.SESSION_ALLOWED_TTL),到期自动回到逐次确认。
         """
         from app.agent import resolve_confirm
         resolve_confirm(str(sid), bool(allowed), bool(remember))

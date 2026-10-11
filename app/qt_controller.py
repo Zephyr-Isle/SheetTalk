@@ -8,7 +8,7 @@ import threading
 
 from PySide6.QtCore import Property, QObject, QTimer, Signal, Slot
 
-from app import config, installer, llm
+from app import agent, config, installer, llm
 from app.chat import ChatSession
 from app.excel_bridge import ExcelBridge
 
@@ -36,6 +36,8 @@ class Controller(QObject):
     busyChanged = Signal()
     themeChanged = Signal()
     installBusyChanged = Signal()
+    # 会话豁免清单变化(勾选「本会话始终允许」/ 撤销 / 到期回收)
+    sessionAllowedChanged = Signal()
     # 窗口被关成后台(托盘)后发出,qt_app 用来弹一次托盘气泡提示
     hiddenToTray = Signal()
     # HTTP 线程请求把主窗口调回前台(/api/show;跨线程,走队列连接)
@@ -294,6 +296,41 @@ class Controller(QObject):
                 self.statusChanged.emit()
         threading.Thread(target=work, daemon=True).start()
 
+    # ---------- 会话豁免(设置页「本会话豁免的危险操作」区块) ----------
+
+    def _get_session_allowed(self):
+        """当前仍有效的会话豁免(含剩余秒数),与侧边栏共用 agent 的同一份状态。
+
+        读取即回收已到期的条目,界面因此不必自己判断超时;界面只需本地倒计时。
+        """
+        try:
+            return agent.session_allowed_items()
+        except Exception:
+            return []
+    sessionAllowed = Property("QVariantList", _get_session_allowed, notify=sessionAllowedChanged)
+
+    def _get_session_allowed_ttl(self):
+        """豁免总时长(秒):界面的「N 分钟后自动失效」文案用它,N 只在 agent 里定义一份。"""
+        return int(agent.SESSION_ALLOWED_TTL)
+    sessionAllowedTtl = Property(int, _get_session_allowed_ttl, notify=sessionAllowedChanged)
+
+    @Slot(str)
+    def revokeSessionAllowed(self, key):
+        """撤销单条会话豁免(键来自 ctrl.sessionAllowed;可能已被回收/已过期)。"""
+        hit = agent.revoke_session_allowed(key)
+        if not self._quitting:
+            self.sessionAllowedChanged.emit()
+        self._emit_ui({"kind": "toast",
+                       "text": "已撤销该豁免" if hit else "该豁免已失效,已刷新列表"})
+
+    @Slot()
+    def clearSessionAllowed(self):
+        """一键撤销全部会话豁免(之后危险操作恢复逐次确认)。"""
+        agent.clear_session_allowed()
+        if not self._quitting:
+            self.sessionAllowedChanged.emit()
+        self._emit_ui({"kind": "toast", "text": "已撤销全部会话豁免"})
+
     # ---------- 设置 ----------
 
     @Slot(result="QVariantMap")
@@ -377,9 +414,12 @@ class Controller(QObject):
     def confirmRun(self, sid, allowed, remember=False):
         """确认条回调:回传危险工具二次确认结果(只是置事件,线程安全)。
 
-        remember=True 时该工具在本会话内不再重复确认。
+        remember=True 时该工具在一段时间内不再重复确认(豁免到期自动失效)。
         """
         self.session.confirm(sid, allowed, remember)
+        # 勾选豁免后清单立刻变了:设置页开着也能马上看到
+        if remember and allowed and not self._quitting:
+            self.sessionAllowedChanged.emit()
 
     @Slot()
     def requestShowWindow(self):
